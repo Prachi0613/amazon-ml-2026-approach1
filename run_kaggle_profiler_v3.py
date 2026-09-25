@@ -23,7 +23,7 @@ def check_db():
     return conn
 
 def profile_v3_poc(conn, max_pairs: int = 50_000):
-    rule = "name_prefix_3"
+    rule = "name_prefix_4"
     src = "s2"
     logger.info(f"--- V3 Bounded Profiling POC: {rule} against {src} ---")
     start_time = time.time()
@@ -34,7 +34,7 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
     logger.info("Computing 64-bit integer hashes for s1 counts...")
     conn.execute(f"""
     CREATE TEMP TABLE tmp_s1_cnt AS 
-    SELECT hash(SUBSTRING(name_norm, 1, 3)) as block_key, COUNT(*) as s1_size 
+    SELECT hash(SUBSTRING(name_norm, 1, 4)) as block_key, COUNT(*) as s1_size 
     FROM s1 
     WHERE name_norm IS NOT NULL AND name_norm != ''
     GROUP BY 1
@@ -43,7 +43,7 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
     logger.info(f"Computing 64-bit integer hashes for {src} counts...")
     conn.execute(f"""
     CREATE TEMP TABLE tmp_s2_cnt AS 
-    SELECT hash(SUBSTRING(name_norm, 1, 3)) as block_key, COUNT(*) as s2_size 
+    SELECT hash(SUBSTRING(name_norm, 1, 4)) as block_key, COUNT(*) as s2_size 
     FROM {src} 
     WHERE name_norm IS NOT NULL AND name_norm != ''
     GROUP BY 1
@@ -96,7 +96,7 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
         FROM tmp_gt_chunk gt
         JOIN s1 ON gt.source1_entity_id = s1.entity_id
         JOIN {src} s2 ON gt.matched_entity_id = s2.entity_id
-        WHERE hash(SUBSTRING(s1.name_norm, 1, 3)) = hash(SUBSTRING(s2.name_norm, 1, 3))
+        WHERE hash(SUBSTRING(s1.name_norm, 1, 4)) = hash(SUBSTRING(s2.name_norm, 1, 4))
         """).fetchone()[0]
         raw_hits += hits
         
@@ -106,9 +106,9 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
         FROM tmp_gt_chunk gt
         JOIN s1 ON gt.source1_entity_id = s1.entity_id
         JOIN {src} s2 ON gt.matched_entity_id = s2.entity_id
-        JOIN tmp_s1_cnt c1 ON hash(SUBSTRING(s1.name_norm, 1, 3)) = c1.block_key
-        JOIN tmp_s2_cnt c2 ON hash(SUBSTRING(s2.name_norm, 1, 3)) = c2.block_key
-        WHERE hash(SUBSTRING(s1.name_norm, 1, 3)) = hash(SUBSTRING(s2.name_norm, 1, 3))
+        JOIN tmp_s1_cnt c1 ON hash(SUBSTRING(s1.name_norm, 1, 4)) = c1.block_key
+        JOIN tmp_s2_cnt c2 ON hash(SUBSTRING(s2.name_norm, 1, 4)) = c2.block_key
+        WHERE hash(SUBSTRING(s1.name_norm, 1, 4)) = hash(SUBSTRING(s2.name_norm, 1, 4))
           AND (CAST(c1.s1_size AS BIGINT) * CAST(c2.s2_size AS BIGINT)) <= {max_pairs}
         """).fetchone()[0]
         safe_hits += s_hits
