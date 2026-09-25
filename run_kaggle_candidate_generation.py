@@ -25,8 +25,9 @@ def check_db():
     conn = duckdb.connect(DB_PATH)
     return conn
 
-def evaluate_candidates(conn, src: str):
-    logger.info(f"========== EVALUATING CANDIDATES {src.upper()} ==========")
+def evaluate_candidates(conn, src: str, label: str = ""):
+    prefix = f"[{label}] " if label else ""
+    logger.info(f"========== EVALUATING CANDIDATES {src.upper()} {prefix}==========")
     
     # Total unique candidates
     total_cands = conn.execute(f"SELECT COUNT(*) FROM candidates WHERE matched_source = '{src}'").fetchone()[0]
@@ -71,19 +72,19 @@ def evaluate_candidates(conn, src: str):
     """
     over_cap = conn.execute(over_cap_query).fetchone()[0]
     
-    logger.info(f"[1] Total unique candidate pairs: {total_cands}")
-    logger.info(f"[2] Number of S1 entities represented: {s1_rep} / {total_s1}")
-    logger.info(f"[3] Number of GT edges covered: {retrieved_true}")
-    logger.info(f"[4] Candidate recall: {retrieved_true}/{total_true} ({recall*100:.4f}%)")
-    logger.info(f"[5] Candidate pairs per S1 entity: {cands_per_s1:.2f}")
-    logger.info(f"[6] Number of S1 entities with ZERO candidates: {zero_cands}")
-    logger.info(f"[7] Number of S1 entities > cap ({max_cap}): {over_cap}")
+    logger.info(f"{prefix}[1] Total unique candidate pairs: {total_cands}")
+    logger.info(f"{prefix}[2] Number of S1 entities represented: {s1_rep} / {total_s1}")
+    logger.info(f"{prefix}[3] Number of GT edges covered: {retrieved_true}")
+    logger.info(f"{prefix}[4] Candidate recall: {retrieved_true}/{total_true} ({recall*100:.4f}%)")
+    logger.info(f"{prefix}[5] Candidate pairs per S1 entity: {cands_per_s1:.2f}")
+    logger.info(f"{prefix}[6] Number of S1 entities with ZERO candidates: {zero_cands}")
+    logger.info(f"{prefix}[7] Number of S1 entities > cap ({max_cap}): {over_cap}")
     
     # Per-rule candidate counts
     r1_cnt = conn.execute(f"SELECT COUNT(*) FROM candidates WHERE matched_source = '{src}' AND from_exact_name = TRUE").fetchone()[0]
     r2_cnt = conn.execute(f"SELECT COUNT(*) FROM candidates WHERE matched_source = '{src}' AND from_exact_addr = TRUE").fetchone()[0]
     r3_cnt = conn.execute(f"SELECT COUNT(*) FROM candidates WHERE matched_source = '{src}' AND from_name_block = TRUE").fetchone()[0]
-    logger.info(f"[10] Per-rule candidates: exact_name={r1_cnt}, exact_addr={r2_cnt}, prefix4_house={r3_cnt}")
+    logger.info(f"{prefix}[10] Per-rule candidates: exact_name={r1_cnt}, exact_addr={r2_cnt}, prefix4_house={r3_cnt}")
     
     # Per-rule coverage
     if total_true > 0:
@@ -99,8 +100,8 @@ def evaluate_candidates(conn, src: str):
         SELECT COUNT(*) FROM ground_truth gt JOIN candidates c ON gt.source1_entity_id = c.source1_entity_id AND gt.matched_entity_id = c.matched_entity_id
         WHERE c.matched_source = '{src}' AND c.from_name_block = TRUE
         """).fetchone()[0]
-        logger.info(f"[11] Per-rule coverage: exact_name={r1_cov} ({r1_cov/total_true*100:.2f}%), exact_addr={r2_cov} ({r2_cov/total_true*100:.2f}%), prefix4_house={r3_cov} ({r3_cov/total_true*100:.2f}%)")
-        logger.info(f"[12] Union coverage: {retrieved_true} ({recall*100:.2f}%)")
+        logger.info(f"{prefix}[11] Per-rule coverage: exact_name={r1_cov} ({r1_cov/total_true*100:.2f}%), exact_addr={r2_cov} ({r2_cov/total_true*100:.2f}%), prefix4_house={r3_cov} ({r3_cov/total_true*100:.2f}%)")
+        logger.info(f"{prefix}[12] Union coverage: {retrieved_true} ({recall*100:.2f}%)")
 
 def main():
     logger.info("=== Phase 3B Candidate Generation ===")
@@ -134,7 +135,7 @@ def main():
         gc.collect()
         logger.info(f"RSS after {r} -> s2: {get_rss_gb():.3f} GB")
         
-    evaluate_candidates(conn, 's2')
+    evaluate_candidates(conn, 's2', label="PRE-CAP")
     
     # 3. Candidate Generation for S3
     for r, flag in rules:
@@ -142,11 +143,15 @@ def main():
         gc.collect()
         logger.info(f"RSS after {r} -> s3: {get_rss_gb():.3f} GB")
         
-    evaluate_candidates(conn, 's3')
+    evaluate_candidates(conn, 's3', label="PRE-CAP")
     
-    # Note: We are not explicitly capping candidates here, as this script is meant to evaluate
-    # the un-capped performance of Phase 3B. However, the stats report how many S1s are over cap.
-    # The actual full pipeline will cap candidates in the next stages.
+    # 4. Final Candidate Capping
+    logger.info("Applying final deterministic candidate cap...")
+    blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_S1)
+    
+    logger.info("--- Final Post-Cap Evaluation ---")
+    evaluate_candidates(conn, 's2', label="POST-CAP")
+    evaluate_candidates(conn, 's3', label="POST-CAP")
     
     elapsed = time.time() - start_time
     logger.info(f"[8] Total Runtime: {elapsed:.2f}s")

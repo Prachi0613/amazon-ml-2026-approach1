@@ -108,15 +108,41 @@ class TestCandidateGeneration(unittest.TestCase):
         spam = df[df.source1_entity_id.str.startswith('S1-6')]
         self.assertEqual(len(spam), 0, "Oversized block should produce zero candidates")
 
-    def test_candidate_capping(self):
-        # We need to test the cap_candidates function
+    def test_candidate_capping_determinism(self):
+        # We need to test the cap_candidates function determinism
         self.conn.execute("INSERT INTO s1 VALUES ('S1-CAP', 'target', 'addr')")
-        for i in range(1, 10):
-            self.conn.execute(f"INSERT INTO candidates (source1_entity_id, matched_entity_id, from_exact_name, from_name_block) VALUES ('S1-CAP', 'S2-{i}', {i%2==0}, {i%2!=0})")
+        
+        # Insert 10 candidates with exact same score but different matched_entity_id
+        # from_exact_name = FALSE (0), from_name_block = TRUE (10)
+        # So score = 10 for all
+        for i in range(10, 0, -1):
+            self.conn.execute(f"INSERT INTO candidates (source1_entity_id, matched_entity_id, from_exact_name, from_name_block) VALUES ('S1-CAP', 'S2-{i:02d}', FALSE, TRUE)")
             
         self.blocker.cap_candidates(max_candidates_per_s1=3)
-        cands = self.conn.execute("SELECT * FROM candidates WHERE source1_entity_id = 'S1-CAP'").fetchdf()
-        self.assertEqual(len(cands), 3, "Should be capped to 3 candidates")
+        cands = self.conn.execute("SELECT matched_entity_id FROM candidates WHERE source1_entity_id = 'S1-CAP' ORDER BY matched_entity_id").fetchall()
+        
+        # Should be capped to exactly 3 candidates
+        self.assertEqual(len(cands), 3)
+        
+        # Because scores are tied (10), tie-breaker is matched_entity_id ASC
+        # So we expect S2-01, S2-02, S2-03
+        self.assertEqual(cands[0][0], 'S2-01')
+        self.assertEqual(cands[1][0], 'S2-02')
+        self.assertEqual(cands[2][0], 'S2-03')
+        
+        # Verify removed candidates are totally absent
+        missing = self.conn.execute("SELECT COUNT(*) FROM candidates WHERE matched_entity_id = 'S2-04'").fetchone()[0]
+        self.assertEqual(missing, 0)
+        
+        # Run it again on fresh data to verify identical deterministic behavior
+        self.conn.execute("DELETE FROM candidates")
+        for i in range(10, 0, -1):
+            self.conn.execute(f"INSERT INTO candidates (source1_entity_id, matched_entity_id, from_exact_name, from_name_block) VALUES ('S1-CAP', 'S2-{i:02d}', FALSE, TRUE)")
+            
+        self.blocker.cap_candidates(max_candidates_per_s1=3)
+        cands2 = self.conn.execute("SELECT matched_entity_id FROM candidates WHERE source1_entity_id = 'S1-CAP' ORDER BY matched_entity_id").fetchall()
+        
+        self.assertEqual(cands, cands2, "Deterministic capping failed across runs")
 
 if __name__ == '__main__':
     unittest.main()

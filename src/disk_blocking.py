@@ -120,23 +120,38 @@ class DiskBlocker:
         # We explicitly join s1_blocks and matched_source_blocks, but ONLY for blocks
         # where the pair count <= self.max_block_pairs
         
-        # 1. Create a temporary view of safe keys
-        self.conn.execute("DROP VIEW IF EXISTS safe_keys")
-        safe_keys_query = f"""
-        CREATE VIEW safe_keys AS
+        # We explicitly compute the block frequencies first and materialize safe_keys
+        # to guarantee the DuckDB optimizer does not execute an unsafe Cartesian product.
+        self.conn.execute("DROP TABLE IF EXISTS tmp_s1_cnt")
+        self.conn.execute("DROP TABLE IF EXISTS tmp_s2_cnt")
+        self.conn.execute("DROP TABLE IF EXISTS safe_keys")
+        
+        self.conn.execute(f"""
+        CREATE TEMP TABLE tmp_s1_cnt AS
+        SELECT block_key, COUNT(DISTINCT entity_id) as s1_size
+        FROM s1_blocks
+        WHERE block_type = '{block_type}'
+        GROUP BY block_key
+        """)
+        
+        self.conn.execute(f"""
+        CREATE TEMP TABLE tmp_s2_cnt AS
+        SELECT block_key, COUNT(DISTINCT entity_id) as s2_size
+        FROM {matched_source}_blocks
+        WHERE block_type = '{block_type}'
+        GROUP BY block_key
+        """)
+        
+        self.conn.execute(f"""
+        CREATE TEMP TABLE safe_keys AS
         SELECT t1.block_key
-        FROM s1_blocks t1
-        JOIN {matched_source}_blocks t2 
-          ON t1.block_key = t2.block_key 
-         AND t1.block_type = '{block_type}' 
-         AND t2.block_type = '{block_type}'
-        GROUP BY t1.block_key
-        HAVING CAST(COUNT(DISTINCT t1.entity_id) AS BIGINT) * CAST(COUNT(DISTINCT t2.entity_id) AS BIGINT) <= {self.max_block_pairs}
-        """
-        self.conn.execute(safe_keys_query)
+        FROM tmp_s1_cnt t1
+        JOIN tmp_s2_cnt t2 ON t1.block_key = t2.block_key
+        WHERE CAST(t1.s1_size AS BIGINT) * CAST(t2.s2_size AS BIGINT) <= {self.max_block_pairs}
+        """)
         
         # 2. Insert the actual candidate pairs directly into the candidates table via UPSERT
-        # We use an UPSERT pattern in DuckDB.
+        # We use safe_keys as the driving table.
         insert_query = f"""
         INSERT INTO candidates (source1_entity_id, matched_entity_id, matched_source, {flag_col})
         SELECT 
@@ -144,23 +159,26 @@ class DiskBlocker:
             s2.entity_id, 
             '{matched_source}', 
             TRUE
-        FROM s1_blocks s1
+        FROM safe_keys sk
+        JOIN s1_blocks s1 
+          ON sk.block_key = s1.block_key AND s1.block_type = '{block_type}'
         JOIN {matched_source}_blocks s2 
-          ON s1.block_key = s2.block_key
-        JOIN safe_keys sk 
-          ON s1.block_key = sk.block_key
-        WHERE s1.block_type = '{block_type}' AND s2.block_type = '{block_type}'
+          ON sk.block_key = s2.block_key AND s2.block_type = '{block_type}'
         ON CONFLICT (source1_entity_id, matched_entity_id) 
         DO UPDATE SET {flag_col} = TRUE;
         """
         self.conn.execute(insert_query)
+        
+        # Clean up
+        self.conn.execute("DROP TABLE tmp_s1_cnt")
+        self.conn.execute("DROP TABLE tmp_s2_cnt")
+        self.conn.execute("DROP TABLE safe_keys")
         
         # Write checkpoint
         self.conn.execute(f"INSERT INTO checkpoints VALUES ('{checkpoint_key}')")
         
         inserted_count = self.conn.execute(f"SELECT COUNT(*) FROM candidates WHERE {flag_col} = TRUE AND matched_source = '{matched_source}'").fetchone()[0]
         logger.info(f"Candidate generation complete. Candidates with {flag_col}=TRUE from {matched_source}: {inserted_count}")
-        self.conn.execute("DROP VIEW IF EXISTS safe_keys")
 
     def evaluate_recall(self) -> dict:
         """
