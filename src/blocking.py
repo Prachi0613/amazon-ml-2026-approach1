@@ -404,8 +404,8 @@ def _retrieve_ngram_pass(
     Retrieve n-gram candidates for all S1 entities using chunked sparse
     cosine-similarity retrieval. Returns a DataFrame instead of dicts.
     """
-    # Guard: if vectorizer has no vocabulary (empty corpus), return nothing.
-    if not hasattr(vectorizer, "vocabulary_") or X_corpus.shape[1] == 0:
+    # Guard: if corpus is empty, return nothing.
+    if X_corpus.shape[0] == 0 or X_corpus.shape[1] == 0:
         return pd.DataFrame()
 
     eid_col = config.COL_ENTITY_ID

@@ -144,6 +144,29 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
         if not cands.empty:
             # Register them to DuckDB and update coverage
             conn.register("tmp_cands", cands)
+            
+            if chunk_start == 0:
+                logger.info(f"--- DIAGNOSTICS (First Chunk) ---")
+                n_cands = len(cands)
+                logger.info(f"Retrieved candidate pairs: {n_cands}")
+                u_target = cands['matched_entity_id'].nunique()
+                logger.info(f"Unique target entity IDs: {u_target}")
+                
+                # Check if target ID exists in target table
+                t_exist = conn.execute(f"SELECT COUNT(*) FROM tmp_cands c JOIN {src} s ON c.matched_entity_id = s.entity_id").fetchone()[0]
+                logger.info(f"Retrieved pairs whose target ID exists in {src}: {t_exist}")
+                
+                # Check if pair exists in ground truth
+                gt_match = conn.execute(f"SELECT COUNT(*) FROM tmp_cands c JOIN tmp_gt_flags gt ON c.source1_entity_id = gt.source1_entity_id AND c.matched_entity_id = gt.matched_entity_id").fetchone()[0]
+                logger.info(f"Retrieved pairs existing in ground truth: {gt_match}")
+                
+                if gt_match > 0:
+                    sample = conn.execute(f"SELECT c.source1_entity_id, c.matched_entity_id FROM tmp_cands c JOIN tmp_gt_flags gt ON c.source1_entity_id = gt.source1_entity_id AND c.matched_entity_id = gt.matched_entity_id LIMIT 1").fetchone()
+                    logger.info(f"Sample matching pair: {sample}")
+                else:
+                    logger.info("No matching pairs found in first chunk.")
+                logger.info(f"--------------------------------")
+            
             conn.execute("""
             UPDATE tmp_gt_flags
             SET r4_safe = TRUE
@@ -160,6 +183,7 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
             gc.collect()
             
     elapsed = time.time() - start_time
+    logger.info(f"Total N-Gram pairs retrieved: {total_retrieved}")
     
     # 4. Coverage Analysis
     logger.info("=== Coverage Analysis ===")
