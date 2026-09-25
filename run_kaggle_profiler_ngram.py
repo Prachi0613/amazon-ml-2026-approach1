@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 DB_PATH = "output/entity_resolution.duckdb"
+NGRAM_PROFILE_S1_SAMPLE = 100_000
 
 def get_rss_gb():
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024 * 1024)
@@ -28,18 +29,34 @@ def check_db():
 def evaluate_source(conn, src: str, max_pairs: int = 50_000):
     logger.info(f"========== EVALUATING {src.upper()} ==========")
     
+    total_s1 = conn.execute("SELECT COUNT(*) FROM s1").fetchone()[0]
+    if NGRAM_PROFILE_S1_SAMPLE <= 0 or NGRAM_PROFILE_S1_SAMPLE > total_s1:
+        logger.error(f"Invalid NGRAM_PROFILE_S1_SAMPLE: {NGRAM_PROFILE_S1_SAMPLE}. Must be > 0 and <= {total_s1}")
+        sys.exit(1)
+        
+    logger.info("N-gram profiling is BOUNDED SAMPLE MODE")
+    logger.info(f"Total S1 Rows: {total_s1} | Sample Size: {NGRAM_PROFILE_S1_SAMPLE}")
+    
+    conn.execute("DROP TABLE IF EXISTS tmp_s1_sample")
+    conn.execute(f"""
+    CREATE TEMP TABLE tmp_s1_sample AS
+    SELECT * FROM s1 
+    TABLESAMPLE RESERVOIR({NGRAM_PROFILE_S1_SAMPLE} ROWS) REPEATABLE (42)
+    """)
+    
     # 1. Initialize GT Flags Table
-    logger.info("Initializing GT coverage tracking table...")
+    logger.info("Initializing GT coverage tracking table for the SAMPLE...")
     conn.execute("DROP TABLE IF EXISTS tmp_gt_flags")
     conn.execute(f"""
     CREATE TEMP TABLE tmp_gt_flags AS
-    SELECT source1_entity_id, matched_entity_id, 
+    SELECT gt.source1_entity_id, gt.matched_entity_id, 
            FALSE as r1_safe,
            FALSE as r2_safe,
            FALSE as r3_safe,
            FALSE as r4_safe
-    FROM ground_truth
-    WHERE matched_entity_id LIKE '{src.upper()}-%'
+    FROM ground_truth gt
+    JOIN tmp_s1_sample s1 ON gt.source1_entity_id = s1.entity_id
+    WHERE gt.matched_entity_id LIKE '{src.upper()}-%'
     """)
     
     rules = [
@@ -49,6 +66,7 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
     ]
     
     total_edges = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags").fetchone()[0]
+    logger.info(f"GT Edges in Sampled Population: {total_edges}")
     
     # 2. Compute Existing Three-Pass Rules
     for i, (r_name, key_expr) in enumerate(rules, 1):
@@ -56,6 +74,7 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
         conn.execute("DROP TABLE IF EXISTS tmp_s1_cnt")
         conn.execute("DROP TABLE IF EXISTS tmp_src_cnt")
         
+        # We must compute sizes over ALL S1 to properly identify oversized blocks
         conn.execute(f"""
         CREATE TEMP TABLE tmp_s1_cnt AS 
         SELECT hash({key_expr}) as block_key, COUNT(*) as s1_size 
@@ -86,7 +105,7 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
                 SELECT gt.source1_entity_id, gt.matched_entity_id,
                        c1.s1_size, c2.s2_size
                 FROM (SELECT * FROM tmp_gt_flags ORDER BY source1_entity_id, matched_entity_id LIMIT {chunk_size} OFFSET {offset}) gt
-                JOIN s1 ON gt.source1_entity_id = s1.entity_id
+                JOIN tmp_s1_sample s1 ON gt.source1_entity_id = s1.entity_id
                 JOIN {src} ON gt.matched_entity_id = {src}.entity_id
                 JOIN tmp_s1_cnt c1 ON hash({s1_expr}) = c1.block_key
                 JOIN tmp_src_cnt c2 ON hash({s2_expr}) = c2.block_key
@@ -109,7 +128,8 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
     
     # Load required data into memory
     logger.info("Loading entity IDs and name_norm for N-Gram...")
-    s1_df = conn.execute("SELECT entity_id, name_norm FROM s1").fetchdf()
+    # ONLY load the sampled S1 rows
+    s1_df = conn.execute("SELECT entity_id, name_norm FROM tmp_s1_sample").fetchdf()
     src_df = conn.execute(f"SELECT entity_id, name_norm FROM {src}").fetchdf()
     empty_df = pd.DataFrame(columns=['entity_id', 'name_norm'])
     
@@ -124,11 +144,14 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
     vect, X_corp, corp_ids, corp_srcs = _build_ngram_index(s2_arg, s3_arg, cfg.COL_NAME_NORM, cfg)
     
     n_s1 = len(s1_df)
-    logger.info(f"Total S1 rows evaluated: {n_s1}")
+    logger.info(f"Sampled S1 rows evaluated: {n_s1}")
     logger.info(f"TOP_K used: {cfg.TOP_K_NAME}")
     
     chunk_size = cfg.NGRAM_CHUNK_SIZE
     total_retrieved = 0
+    
+    # Expect this to take roughly 5% of the time of the full run (since 100k / 2.2M ~ 4.5%)
+    logger.info("Starting N-Gram retrieval for the 100k sample. Expected time: 1-2 minutes.")
     
     for chunk_start in range(0, n_s1, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_s1)
@@ -159,12 +182,6 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
                 # Check if pair exists in ground truth
                 gt_match = conn.execute(f"SELECT COUNT(*) FROM tmp_cands c JOIN tmp_gt_flags gt ON c.source1_entity_id = gt.source1_entity_id AND c.matched_entity_id = gt.matched_entity_id").fetchone()[0]
                 logger.info(f"Retrieved pairs existing in ground truth: {gt_match}")
-                
-                if gt_match > 0:
-                    sample = conn.execute(f"SELECT c.source1_entity_id, c.matched_entity_id FROM tmp_cands c JOIN tmp_gt_flags gt ON c.source1_entity_id = gt.source1_entity_id AND c.matched_entity_id = gt.matched_entity_id LIMIT 1").fetchone()
-                    logger.info(f"Sample matching pair: {sample}")
-                else:
-                    logger.info("No matching pairs found in first chunk.")
                 logger.info(f"--------------------------------")
             
             conn.execute("""
@@ -178,38 +195,42 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
             total_retrieved += len(cands)
             
         del s1_chunk, cands
-        if chunk_start > 0 and chunk_start % 500_000 < chunk_size:
+        if chunk_start > 0 and chunk_start % 50_000 < chunk_size:
             logger.info(f"N-Gram Chunk [{chunk_start}/{n_s1}] | RSS: {get_rss_gb():.3f} GB")
             gc.collect()
             
     elapsed = time.time() - start_time
-    logger.info(f"Total N-Gram pairs retrieved: {total_retrieved}")
+    logger.info(f"Total N-Gram pairs retrieved for sample: {total_retrieved}")
     
-    # 4. Coverage Analysis
-    logger.info("=== Coverage Analysis ===")
+    # 4. Coverage Analysis on Sample
+    logger.info("=== Coverage Analysis (Sampled Population) ===")
     
-    # Baseline 3-Pass
-    r123 = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags WHERE r1_safe OR r2_safe OR r3_safe").fetchone()[0]
-    
-    # N-Gram only
-    r4 = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags WHERE r4_safe").fetchone()[0]
-    
-    # 3-Pass + N-Gram
-    union_all = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags WHERE r1_safe OR r2_safe OR r3_safe OR r4_safe").fetchone()[0]
-    
-    incremental = union_all - r123
-    
-    logger.info(f"[A] Existing 3-Pass coverage: {r123} / {total_edges} ({r123/total_edges*100:.2f}%)")
-    logger.info(f"[B] N-Gram only coverage: {r4} / {total_edges} ({r4/total_edges*100:.2f}%)")
-    logger.info(f"    - N-Gram GT Edges Retrieved: {r4}")
-    logger.info(f"    - N-Gram GT Edges Missed: {total_edges - r4}")
-    logger.info(f"[C] 3-Pass UNION N-Gram coverage: {union_all} / {total_edges} ({union_all/total_edges*100:.2f}%)")
-    logger.info(f"[D] Incremental edges from N-Gram: {incremental}")
-    logger.info(f"[E] Incremental recall points: {(incremental/total_edges)*100:.2f}")
-    
+    if total_edges > 0:
+        # Baseline 3-Pass
+        r123 = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags WHERE r1_safe OR r2_safe OR r3_safe").fetchone()[0]
+        
+        # N-Gram only
+        r4 = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags WHERE r4_safe").fetchone()[0]
+        
+        # 3-Pass + N-Gram
+        union_all = conn.execute("SELECT COUNT(*) FROM tmp_gt_flags WHERE r1_safe OR r2_safe OR r3_safe OR r4_safe").fetchone()[0]
+        
+        incremental = union_all - r123
+        
+        logger.info(f"[A] 3-Pass sample coverage: {r123} / {total_edges} ({r123/total_edges*100:.2f}%)")
+        logger.info(f"[B] N-Gram only sample coverage: {r4} / {total_edges} ({r4/total_edges*100:.2f}%)")
+        logger.info(f"    - N-Gram GT Edges Retrieved: {r4}")
+        logger.info(f"    - N-Gram GT Edges Missed: {total_edges - r4}")
+        logger.info(f"[C] 3-Pass UNION N-Gram sample coverage: {union_all} / {total_edges} ({union_all/total_edges*100:.2f}%)")
+        logger.info(f"[D] Incremental sample edges from N-Gram: {incremental}")
+        logger.info(f"[E] Incremental sample recall points: {(incremental/total_edges)*100:.2f}")
+    else:
+        logger.info("No ground-truth edges found for the sampled S1 population.")
+        
     logger.info(f"Runtime: {elapsed:.2f}s | Peak RSS tracking via OS")
     
     conn.execute("DROP TABLE tmp_gt_flags")
+    conn.execute("DROP TABLE tmp_s1_sample")
     del s1_df, src_df, empty_df, s2_arg, s3_arg, vect, X_corp, corp_ids, corp_srcs
     gc.collect()
 
