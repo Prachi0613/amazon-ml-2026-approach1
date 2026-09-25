@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 DB_PATH = "output/entity_resolution.duckdb"
-NGRAM_PROFILE_S1_SAMPLE = 100_000
+NGRAM_PROFILE_S1_SAMPLE = 10_000
 
 def get_rss_gb():
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024 * 1024)
@@ -195,9 +195,11 @@ def evaluate_source(conn, src: str, max_pairs: int = 50_000):
             total_retrieved += len(cands)
             
         del s1_chunk, cands
-        if chunk_start > 0 and chunk_start % 50_000 < chunk_size:
-            logger.info(f"N-Gram Chunk [{chunk_start}/{n_s1}] | RSS: {get_rss_gb():.3f} GB")
-            gc.collect()
+        
+        # Log progress after EVERY chunk
+        elapsed_so_far = time.time() - start_time
+        logger.info(f"Chunk [{(chunk_start//chunk_size)+1}] | S1 processed: {min(chunk_start+chunk_size, n_s1)}/{n_s1} | Pairs retrieved: {total_retrieved} | Time: {elapsed_so_far:.2f}s | RSS: {get_rss_gb():.3f} GB")
+        gc.collect()
             
     elapsed = time.time() - start_time
     logger.info(f"Total N-Gram pairs retrieved for sample: {total_retrieved}")
@@ -243,8 +245,11 @@ def main():
     try:
         evaluate_source(conn, "s2")
         evaluate_source(conn, "s3")
+        logger.info("NGRAM_PROFILE_COMPLETE")
     except Exception as e:
-        logger.error(f"N-Gram Profiler Failed: {e}")
+        import traceback
+        logger.error("NGRAM_PROFILE_FAILED")
+        traceback.print_exc()
         
     conn.close()
 
