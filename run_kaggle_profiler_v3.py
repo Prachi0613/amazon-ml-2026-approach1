@@ -105,7 +105,7 @@ def update_gt_flags(conn, rule_idx: int, key_expr: str, src: str, max_pairs: int
         gc.collect()
 
 def profile_union_poc(conn, max_pairs: int = 50_000):
-    src = "s2"
+    src = "s3"
     logger.info(f"=== V3 Bounded Union Profiling POC against {src} ===")
     start_time = time.time()
     
