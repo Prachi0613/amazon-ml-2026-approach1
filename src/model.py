@@ -25,6 +25,7 @@ from src.blocking import (
     COL_S1_ID, COL_CAND_ID, COL_CAND_SRC
 )
 from src.features import get_feature_columns
+from src.gpu_utils import resolve_device_type
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,18 @@ class EntityMatcher:
         # Deep copy config params to avoid mutating the class default
         params = dict(self.config.LGBM_PARAMS)
         params["scale_pos_weight"] = scale_pos_weight
+        
+        # Resolve device
+        device_type = resolve_device_type(self.config.USE_GPU, self.config.GPU_BACKEND)
+        if device_type == "cpu":
+            logger.info("LightGBM device: CPU")
+            if self.config.USE_GPU:
+                logger.info("Reason: GPU backend unavailable")
+        else:
+            logger.info("LightGBM device: GPU")
+            logger.info(f"GPU backend: {device_type}")
+            
+        params["device_type"] = device_type
 
         # Prepare LightGBM Datasets
         dtrain = lgb.Dataset(train_features, label=y_train)

@@ -245,6 +245,12 @@ class PipelineConfig:
     # ------------------------------------------------------------------
     # 2i. LightGBM configuration
     # ------------------------------------------------------------------
+    
+    USE_GPU: bool = True
+    """Whether to attempt using GPU for LightGBM."""
+    
+    GPU_BACKEND: str = "auto"
+    """Which LightGBM GPU backend to use ('auto', 'cuda', 'gpu', 'cpu')."""
 
     LGBM_PARAMS: Dict[str, object] = field(default_factory=lambda: {
         # Task
@@ -445,6 +451,8 @@ class PipelineConfig:
             f"    COUNTRY_CONSTRAINT: {self.USE_COUNTRY_AS_RETRIEVAL_CONSTRAINT}",
             "",
             "  LightGBM",
+            f"    USE_GPU           : {self.USE_GPU}",
+            f"    GPU_BACKEND       : {self.GPU_BACKEND}",
             f"    n_estimators      : {self.LGBM_PARAMS['n_estimators']}",
             f"    learning_rate     : {self.LGBM_PARAMS['learning_rate']}",
             f"    num_leaves        : {self.LGBM_PARAMS['num_leaves']}",

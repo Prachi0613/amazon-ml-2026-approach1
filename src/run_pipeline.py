@@ -43,6 +43,7 @@ from src.features import generate_features
 from src.model import EntityMatcher, build_candidate_labels
 from src.evaluation import split_validation_data, tune_threshold, evaluate_predictions
 from src.submission import write_candidate_pairs, write_matching_results
+from src.gpu_utils import get_nvidia_smi_output
 
 
 def run():
@@ -121,8 +122,15 @@ def run():
     # 6. LightGBM Training
     # -----------------------------------------------------------------------
     logger.info("Training LightGBM Matcher...")
+    
+    if cfg.USE_GPU:
+        logger.info("GPU status before training:\n" + get_nvidia_smi_output())
+        
     matcher = EntityMatcher(cfg)
     matcher.fit(X_train, y_train, X_val, y_val)
+    
+    if cfg.USE_GPU:
+        logger.info("GPU status after training:\n" + get_nvidia_smi_output())
     
     # -----------------------------------------------------------------------
     # 7. Validation Prediction & Threshold Tuning
