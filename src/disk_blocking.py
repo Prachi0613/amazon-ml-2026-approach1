@@ -38,8 +38,8 @@ class DiskBlocker:
     def generate_exact_blocks(self):
         """Populate exact name, exact address, and prefix4+house blocks (Phase 3B)."""
         import time
-        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR PRIMARY KEY)")
-        exists = self.conn.execute("SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = 'PHASE3B_BLOCKING_KEYS_COMPLETE'").fetchone()[0]
+        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (pass_name VARCHAR PRIMARY KEY)")
+        exists = self.conn.execute("SELECT COUNT(*) FROM checkpoints WHERE pass_name = 'PHASE3B_BLOCKING_KEYS_COMPLETE'").fetchone()[0]
         if exists > 0:
             logger.info("PHASE3B_BLOCKING_KEYS_COMPLETE: Skipped block generation.")
             return
@@ -148,8 +148,8 @@ class DiskBlocker:
         pass_checkpoint = f"{block_type}_{matched_source}_COMPLETE"
         
         # Check if pass already completed entirely
-        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR PRIMARY KEY)")
-        exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = '{pass_checkpoint}'").fetchone()[0]
+        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (pass_name VARCHAR PRIMARY KEY)")
+        exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE pass_name = '{pass_checkpoint}'").fetchone()[0]
         if exists > 0:
             logger.info(f"Checkpoint found for '{pass_checkpoint}'. Skipping generation.")
             return
@@ -201,7 +201,7 @@ class DiskBlocker:
             batch_checkpoint = f"{block_type}_{matched_source}_batch_{batch_idx}_offset_{offset}"
             
             # Check if this batch is already done
-            batch_exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = '{batch_checkpoint}'").fetchone()[0]
+            batch_exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE pass_name = '{batch_checkpoint}'").fetchone()[0]
             if batch_exists > 0:
                 logger.info(f"Skipping completed batch: {batch_checkpoint}")
                 batch_idx += 1

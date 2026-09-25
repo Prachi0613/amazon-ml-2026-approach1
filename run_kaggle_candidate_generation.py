@@ -112,8 +112,8 @@ def main():
     conn.execute("PRAGMA temp_directory='output/intermediate/tmp'")
     os.makedirs("output/intermediate/tmp", exist_ok=True)
     
-    # Initialize checkpoints table
-    conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR PRIMARY KEY)")
+    # Initialize checkpoints table (using pass_name for backward compatibility)
+    conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (pass_name VARCHAR PRIMARY KEY)")
     
     # Initialize candidates table if not exists (resume mode)
     logger.info("PHASE3B_RESUME_STATE: Checking existing state...")
@@ -133,7 +133,7 @@ def main():
     """)
     
     # Print resume state
-    resumed = conn.execute("SELECT checkpoint_id FROM checkpoints").fetchall()
+    resumed = conn.execute("SELECT pass_name FROM checkpoints").fetchall()
     for row in resumed:
         logger.info(f"RESUME STATE: {row[0]}")
     
@@ -143,7 +143,7 @@ def main():
     
     try:
         # 0. Check if entire phase is already completed
-        is_complete = conn.execute("SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = 'PHASE3B_COMPLETE'").fetchone()[0]
+        is_complete = conn.execute("SELECT COUNT(*) FROM checkpoints WHERE pass_name = 'PHASE3B_COMPLETE'").fetchone()[0]
         if is_complete > 0:
             logger.info("PHASE3B_COMPLETE: Phase 3B candidate generation is already fully completed.")
             return

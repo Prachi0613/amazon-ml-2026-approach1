@@ -169,7 +169,7 @@ class TestCandidateGeneration(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM s1_blocks").fetchone()[0], 4)
         
         # Manually delete the complete checkpoint to simulate a failed previous run
-        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'PHASE3B_BLOCKING_KEYS_COMPLETE'")
+        self.conn.execute("DELETE FROM checkpoints WHERE pass_name = 'PHASE3B_BLOCKING_KEYS_COMPLETE'")
         
         # Second initialization (should safely DROP and CREATE, clearing the corruption)
         self.blocker.generate_exact_blocks()
@@ -182,7 +182,7 @@ class TestCandidateGeneration(unittest.TestCase):
         # Ensure it works end-to-end after restart
         self.conn.execute("INSERT INTO s2 VALUES ('S2-1', 'amazon', 'seattle')")
         # Need to clear the checkpoint so it actually runs
-        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'PHASE3B_BLOCKING_KEYS_COMPLETE'")
+        self.conn.execute("DELETE FROM checkpoints WHERE pass_name = 'PHASE3B_BLOCKING_KEYS_COMPLETE'")
         self.blocker.generate_exact_blocks()
         self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
         
@@ -217,8 +217,8 @@ class TestCandidateGeneration(unittest.TestCase):
         self.assertEqual(cands_skipped, 0)
         
         # Now delete the batch checkpoint AND the pass checkpoint to rerun it successfully.
-        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'exact_name_s2_batch_0_offset_0'")
-        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'exact_name_s2_COMPLETE'")
+        self.conn.execute("DELETE FROM checkpoints WHERE pass_name = 'exact_name_s2_batch_0_offset_0'")
+        self.conn.execute("DELETE FROM checkpoints WHERE pass_name = 'exact_name_s2_COMPLETE'")
         self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
         
         cands_run = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
@@ -228,6 +228,76 @@ class TestCandidateGeneration(unittest.TestCase):
         self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
         cands_final = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
         self.assertEqual(cands_final, 3) # Still 3, didn't run again
+
+    def test_backward_compatibility(self):
+        """Verify that an existing DuckDB with the old pass_name schema is correctly resumed."""
+    def test_backward_compatibility(self):
+        """Verify that an existing DuckDB with the old pass_name schema is correctly resumed."""
+        # Insert some data and candidate tables as they would exist in an interrupted run
+        self.conn.execute("INSERT INTO s1 VALUES ('S1-BW-1', 'amazon', 'seattle')")
+        self.conn.execute("INSERT INTO s2 VALUES ('S2-BW-1', 'amazon', 'seattle')")
+        
+        self.conn.execute("INSERT INTO candidates (source1_entity_id, matched_entity_id, matched_source, from_exact_name, score) VALUES ('S1-BW-1', 'S2-BW-1', 's2', TRUE, 0.0)")
+        
+        # Explicitly create the old schema: pass_name instead of checkpoint_id
+        self.conn.execute("CREATE TABLE checkpoints (pass_name VARCHAR PRIMARY KEY)")
+        
+        # Insert old pass-level completions
+        self.conn.execute("INSERT INTO checkpoints VALUES ('PHASE3B_BLOCKING_KEYS_COMPLETE')")
+        self.conn.execute("INSERT INTO checkpoints VALUES ('exact_name_s2_COMPLETE')")
+        self.conn.execute("INSERT INTO checkpoints VALUES ('exact_addr_s2_COMPLETE')")
+        
+        # Insert new batch-level completion for prefix4_house
+        self.conn.execute("INSERT INTO checkpoints VALUES ('prefix4_house_s2_batch_0_offset_0')")
+        
+        # 2. Re-open via our DiskBlocker code
+        # Wait, self.blocker already opened it! But self.blocker was initialized in setUp before we made checkpoints table.
+        # It doesn't matter because DiskBlocker uses the same DB path dynamically.
+        # Validate that CREATE TABLE IF NOT EXISTS doesn't blow up the schema
+        # In run_kaggle_candidate_generation, it does CREATE TABLE IF NOT EXISTS checkpoints (pass_name VARCHAR PRIMARY KEY)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (pass_name VARCHAR PRIMARY KEY)")
+        
+        # 3. Verify exactly what the user asked
+        # - old checkpoints are still present
+        checkpoints_df = self.conn.execute("SELECT * FROM checkpoints").fetchdf()
+        self.assertEqual(len(checkpoints_df), 4)
+        
+        # - no existing candidate rows are deleted
+        cands_df = self.conn.execute("SELECT * FROM candidates").fetchdf()
+        self.assertEqual(len(cands_df), 1)
+        self.assertEqual(cands_df.iloc[0]['source1_entity_id'], 'S1-BW-1')
+        
+        # - exact_name_s2 completion is recognized (it should instantly return)
+        self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
+        # since it instantly returns, candidates count is still 1
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 1)
+        
+        # - new batch checkpoints can be written (simulate prefix4_house completion)
+        # Note: we skip prefix4_house block generation because PHASE3B_BLOCKING_KEYS_COMPLETE exists!
+        # So we must manually inject blocks so the batch generator can run batch 1.
+        self.conn.execute("CREATE TABLE IF NOT EXISTS s1_blocks (entity_id VARCHAR, block_type VARCHAR, block_key VARCHAR)")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS s2_blocks (entity_id VARCHAR, block_type VARCHAR, block_key VARCHAR)")
+        self.conn.execute("INSERT INTO s1_blocks VALUES ('S1-BW-2', 'prefix4_house', 'amaz_seattle')")
+        self.conn.execute("INSERT INTO s2_blocks VALUES ('S2-BW-2', 'prefix4_house', 'amaz_seattle')")
+        
+        # Now run prefix4_house. We already marked batch 0 (offset 0) as complete!
+        self.blocker.generate_candidates('prefix4_house', 's2', 'from_name_block')
+        
+        # candidates should STILL be 1 because batch 0 was skipped.
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 1)
+        
+        # Now let's test a batch that is NOT complete.
+        self.conn.execute("DELETE FROM checkpoints WHERE pass_name = 'prefix4_house_s2_batch_0_offset_0'")
+        self.conn.execute("DELETE FROM checkpoints WHERE pass_name = 'prefix4_house_s2_COMPLETE'")
+        self.blocker.generate_candidates('prefix4_house', 's2', 'from_name_block')
+        
+        # Now it should process batch 0 and insert the new candidate
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 2)
+        
+        # Validate that the new batch checkpoint was successfully written!
+        new_batch_exists = self.conn.execute("SELECT COUNT(*) FROM checkpoints WHERE pass_name = 'prefix4_house_s2_batch_0_offset_0'").fetchone()[0]
+        self.assertEqual(new_batch_exists, 1)
+
 
 if __name__ == '__main__':
     unittest.main()
