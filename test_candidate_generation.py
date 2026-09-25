@@ -229,8 +229,23 @@ class TestCandidateGeneration(unittest.TestCase):
         cands_final = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
         self.assertEqual(cands_final, 3) # Still 3, didn't run again
 
-    def test_backward_compatibility(self):
-        """Verify that an existing DuckDB with the old pass_name schema is correctly resumed."""
+    def test_schema_preservation_on_create_if_not_exists(self):
+        """Prove that CREATE TABLE IF NOT EXISTS does not alter existing schemas in DuckDB."""
+        self.conn.execute("CREATE TABLE checkpoints_test (old_col VARCHAR PRIMARY KEY)")
+        self.conn.execute("INSERT INTO checkpoints_test VALUES ('val1')")
+        
+        # If we run CREATE TABLE IF NOT EXISTS with a DIFFERENT column name, DuckDB ignores it.
+        # It does NOT add new_col, it does NOT rename old_col.
+        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints_test (new_col VARCHAR PRIMARY KEY)")
+        
+        # Verify old_col is still there and works
+        count = self.conn.execute("SELECT COUNT(*) FROM checkpoints_test WHERE old_col = 'val1'").fetchone()[0]
+        self.assertEqual(count, 1)
+        
+        # Verify new_col does NOT exist (this would throw a BinderException in real code)
+        with self.assertRaises(duckdb.BinderException):
+            self.conn.execute("SELECT new_col FROM checkpoints_test")
+
     def test_backward_compatibility(self):
         """Verify that an existing DuckDB with the old pass_name schema is correctly resumed."""
         # Insert some data and candidate tables as they would exist in an interrupted run
