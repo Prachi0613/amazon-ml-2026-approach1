@@ -112,52 +112,75 @@ def main():
     conn.execute("PRAGMA temp_directory='output/intermediate/tmp'")
     os.makedirs("output/intermediate/tmp", exist_ok=True)
     
-    # Clear any old candidates to ensure a fresh run
-    conn.execute("DELETE FROM candidates")
+    # Clear any old candidates safely without causing massive MVCC DELETE overhead
+    logger.info("Resetting candidates table...")
+    conn.execute("DROP TABLE IF EXISTS candidates")
+    conn.execute("""
+    CREATE TABLE candidates (
+        source1_entity_id VARCHAR,
+        matched_entity_id VARCHAR,
+        matched_source VARCHAR,
+        from_exact_name BOOLEAN DEFAULT FALSE,
+        from_exact_addr BOOLEAN DEFAULT FALSE,
+        from_name_block BOOLEAN DEFAULT FALSE,
+        from_addr_block BOOLEAN DEFAULT FALSE,
+        from_sorted_neighborhood BOOLEAN DEFAULT FALSE,
+        score FLOAT DEFAULT 0.0,
+        PRIMARY KEY (source1_entity_id, matched_entity_id)
+    )
+    """)
     conn.execute("DROP TABLE IF EXISTS checkpoints")
     
     # Initialize disk blocker
     logger.info(f"Initializing DiskBlocker... (RSS: {get_rss_gb():.3f} GB)")
     blocker = DiskBlocker(DB_PATH, "output/intermediate/tmp", max_block_pairs=50_000)
     
-    # 1. Generate blocks (extract keys for S1, S2, S3)
-    blocker.generate_exact_blocks()
-    
-    rules = [
-        ('exact_name', 'from_exact_name'),
-        ('exact_addr', 'from_exact_addr'),
-        ('prefix4_house', 'from_name_block')
-    ]
-    
-    # 2. Candidate Generation for S2
-    for r, flag in rules:
-        blocker.generate_candidates(r, 's2', flag)
-        gc.collect()
-        logger.info(f"RSS after {r} -> s2: {get_rss_gb():.3f} GB")
+    try:
+        # 1. Generate blocks (extract keys for S1, S2, S3)
+        blocker.generate_exact_blocks()
         
-    evaluate_candidates(conn, 's2', label="PRE-CAP")
-    
-    # 3. Candidate Generation for S3
-    for r, flag in rules:
-        blocker.generate_candidates(r, 's3', flag)
-        gc.collect()
-        logger.info(f"RSS after {r} -> s3: {get_rss_gb():.3f} GB")
+        rules = [
+            ('exact_name', 'from_exact_name'),
+            ('exact_addr', 'from_exact_addr'),
+            ('prefix4_house', 'from_name_block')
+        ]
         
-    evaluate_candidates(conn, 's3', label="PRE-CAP")
-    
-    # 4. Final Candidate Capping
-    logger.info("Applying final deterministic candidate cap...")
-    blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_ENTITY)
-    
-    logger.info("--- Final Post-Cap Evaluation ---")
-    evaluate_candidates(conn, 's2', label="POST-CAP")
-    evaluate_candidates(conn, 's3', label="POST-CAP")
-    
-    elapsed = time.time() - start_time
-    logger.info(f"[8] Total Runtime: {elapsed:.2f}s")
-    logger.info(f"[9] Peak RSS tracking via OS (Current RSS: {get_rss_gb():.3f} GB)")
-    
-    blocker.close()
+        # 2. Candidate Generation for S2
+        for r, flag in rules:
+            blocker.generate_candidates(r, 's2', flag)
+            gc.collect()
+            logger.info(f"RSS after {r} -> s2: {get_rss_gb():.3f} GB")
+            
+        evaluate_candidates(conn, 's2', label="PRE-CAP")
+        
+        # 3. Candidate Generation for S3
+        for r, flag in rules:
+            blocker.generate_candidates(r, 's3', flag)
+            gc.collect()
+            logger.info(f"RSS after {r} -> s3: {get_rss_gb():.3f} GB")
+            
+        evaluate_candidates(conn, 's3', label="PRE-CAP")
+        
+        # 4. Final Candidate Capping
+        logger.info("Applying final deterministic candidate cap...")
+        blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_ENTITY)
+        
+        logger.info("--- Final Post-Cap Evaluation ---")
+        evaluate_candidates(conn, 's2', label="POST-CAP")
+        evaluate_candidates(conn, 's3', label="POST-CAP")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[8] Total Runtime: {elapsed:.2f}s")
+        logger.info(f"[9] Peak RSS tracking via OS (Current RSS: {get_rss_gb():.3f} GB)")
+        logger.info("PHASE3B_CANDIDATE_GENERATION_COMPLETE")
+    except Exception as e:
+        import traceback
+        logger.error("PHASE3B_CANDIDATE_GENERATION_FAILED")
+        logger.error(f"Failed with exception: {e}")
+        traceback.print_exc()
+        raise
+    finally:
+        blocker.close()
 
 if __name__ == "__main__":
     main()

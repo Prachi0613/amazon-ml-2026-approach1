@@ -31,39 +31,71 @@ class DiskBlocker:
     def close(self):
         self.conn.close()
 
+    def _get_rss_gb(self) -> float:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024 * 1024)
+
     def generate_exact_blocks(self):
         """Populate exact name, exact address, and prefix4+house blocks (Phase 3B)."""
+        import time
         logger.info("Generating exact match and prefix4+house blocking keys...")
         
-        for src in ['s1', 's2', 's3']:
-            self.conn.execute(f"DELETE FROM {src}_blocks")
-            
-            # 1. Exact Name
-            self.conn.execute(f"""
-            INSERT INTO {src}_blocks
-            SELECT entity_id, 'exact_name', name_norm 
-            FROM {src} 
-            WHERE name_norm IS NOT NULL AND name_norm != ''
-            """)
-            
-            # 2. Exact Address
-            self.conn.execute(f"""
-            INSERT INTO {src}_blocks
-            SELECT entity_id, 'exact_addr', addr_norm 
-            FROM {src} 
-            WHERE addr_norm IS NOT NULL AND addr_norm != ''
-            """)
-            
-            # 3. name_prefix_4 + addr_house_num
-            self.conn.execute(f"""
-            INSERT INTO {src}_blocks
-            SELECT entity_id, 'prefix4_house', SUBSTRING(name_norm, 1, 4) || '_' || split_part(addr_norm, ' ', 1) 
-            FROM {src} 
-            WHERE name_norm IS NOT NULL AND name_norm != ''
-              AND addr_norm IS NOT NULL AND addr_norm != ''
-            """)
-            
-        logger.info("Phase 3B blocking keys populated.")
+        try:
+            for src in ['s1', 's2', 's3']:
+                # explicit clean/reset of temporary blocking tables
+                logger.info(f"START {src}_blocks reset")
+                t0 = time.time()
+                self.conn.execute(f"DROP TABLE IF EXISTS {src}_blocks")
+                self.conn.execute(f"""
+                CREATE TABLE {src}_blocks (
+                    entity_id VARCHAR,
+                    block_type VARCHAR,
+                    block_key VARCHAR
+                )
+                """)
+                logger.info(f"END {src}_blocks reset | Time: {time.time()-t0:.2f}s | RSS: {self._get_rss_gb():.3f} GB")
+                
+                # 1. Exact Name
+                logger.info(f"START {src} exact_name key population")
+                t0 = time.time()
+                self.conn.execute(f"""
+                INSERT INTO {src}_blocks
+                SELECT entity_id, 'exact_name', name_norm 
+                FROM {src} 
+                WHERE name_norm IS NOT NULL AND name_norm != ''
+                """)
+                logger.info(f"END {src} exact_name key population | Time: {time.time()-t0:.2f}s | RSS: {self._get_rss_gb():.3f} GB")
+                
+                # 2. Exact Address
+                logger.info(f"START {src} exact_addr key population")
+                t0 = time.time()
+                self.conn.execute(f"""
+                INSERT INTO {src}_blocks
+                SELECT entity_id, 'exact_addr', addr_norm 
+                FROM {src} 
+                WHERE addr_norm IS NOT NULL AND addr_norm != ''
+                """)
+                logger.info(f"END {src} exact_addr key population | Time: {time.time()-t0:.2f}s | RSS: {self._get_rss_gb():.3f} GB")
+                
+                # 3. name_prefix_4 + addr_house_num
+                logger.info(f"START {src} prefix4_house key population")
+                t0 = time.time()
+                self.conn.execute(f"""
+                INSERT INTO {src}_blocks
+                SELECT entity_id, 'prefix4_house', SUBSTRING(name_norm, 1, 4) || '_' || split_part(addr_norm, ' ', 1) 
+                FROM {src} 
+                WHERE name_norm IS NOT NULL AND name_norm != ''
+                  AND addr_norm IS NOT NULL AND addr_norm != ''
+                """)
+                logger.info(f"END {src} prefix4_house key population | Time: {time.time()-t0:.2f}s | RSS: {self._get_rss_gb():.3f} GB")
+                
+            logger.info("PHASE3B_BLOCKING_KEYS_COMPLETE")
+        except Exception as e:
+            import traceback
+            logger.error("PHASE3B_BLOCKING_KEYS_FAILED")
+            logger.error(f"Failed during block population. RSS: {self._get_rss_gb():.3f} GB")
+            traceback.print_exc()
+            raise
 
     def profile_blocks(self, block_type: str, matched_source: str) -> pd.DataFrame:
         """

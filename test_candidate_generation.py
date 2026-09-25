@@ -156,5 +156,32 @@ class TestCandidateGeneration(unittest.TestCase):
             # Restore original cap
             object.__setattr__(cfg, 'MAX_CANDIDATES_PER_ENTITY', original_cap)
 
+    def test_repeated_initialization_safety(self):
+        # Insert a little data
+        self.conn.execute("INSERT INTO s1 VALUES ('S1-1', 'amazon', 'seattle')")
+        
+        # First initialization
+        self.blocker.generate_exact_blocks()
+        
+        # Corrupt the blocking table to simulate a failed/stale run
+        self.conn.execute("INSERT INTO s1_blocks VALUES ('S1-STALE', 'exact_name', 'stale')")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM s1_blocks").fetchone()[0], 4)
+        
+        # Second initialization (should safely DROP and CREATE, clearing the corruption)
+        self.blocker.generate_exact_blocks()
+        
+        # The stale row should be gone, exactly 3 rows should remain
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM s1_blocks").fetchone()[0], 3)
+        stale_cnt = self.conn.execute("SELECT COUNT(*) FROM s1_blocks WHERE entity_id = 'S1-STALE'").fetchone()[0]
+        self.assertEqual(stale_cnt, 0)
+        
+        # Ensure it works end-to-end after restart
+        self.conn.execute("INSERT INTO s2 VALUES ('S2-1', 'amazon', 'seattle')")
+        self.blocker.generate_exact_blocks()
+        self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
+        
+        cands = self.conn.execute("SELECT * FROM candidates").fetchdf()
+        self.assertEqual(len(cands), 1)
+
 if __name__ == '__main__':
     unittest.main()
