@@ -356,31 +356,31 @@ class PipelineConfig:
 
     @property
     def TRAIN_SOURCE1(self) -> Path:
-        return self.DATA_DIR / "train_source1.tsv"
+        return self.DATA_DIR / "train" / "train_source1.tsv"
 
     @property
     def TRAIN_SOURCE2(self) -> Path:
-        return self.DATA_DIR / "train_source2.tsv"
+        return self.DATA_DIR / "train" / "train_source2.tsv"
 
     @property
     def TRAIN_SOURCE3(self) -> Path:
-        return self.DATA_DIR / "train_source3.tsv"
+        return self.DATA_DIR / "train" / "train_source3.tsv"
 
     @property
     def TRAIN_GROUND_TRUTH(self) -> Path:
-        return self.DATA_DIR / "train_ground_truth.tsv"
+        return self.DATA_DIR / "train" / "train_ground_truth.tsv"
 
     @property
     def TEST_SOURCE1(self) -> Path:
-        return self.DATA_DIR / "test_source1.tsv"
+        return self.DATA_DIR / "test" / "test_source1.tsv"
 
     @property
     def TEST_SOURCE2(self) -> Path:
-        return self.DATA_DIR / "test_source2.tsv"
+        return self.DATA_DIR / "test" / "test_source2.tsv"
 
     @property
     def TEST_SOURCE3(self) -> Path:
-        return self.DATA_DIR / "test_source3.tsv"
+        return self.DATA_DIR / "test" / "test_source3.tsv"
 
     @property
     def MATCHING_RESULTS_PATH(self) -> Path:
