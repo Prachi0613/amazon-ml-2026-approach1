@@ -83,7 +83,7 @@ def update_gt_flags(conn, rule_idx: int, key_expr: str, src: str, max_pairs: int
         UPDATE tmp_gt_flags
         SET 
             r{rule_idx}_raw = TRUE,
-            r{rule_idx}_safe = (CAST(c1.s1_size AS BIGINT) * CAST(c2.s2_size AS BIGINT) <= {max_pairs})
+            r{rule_idx}_safe = (CAST(sub.s1_size AS BIGINT) * CAST(sub.s2_size AS BIGINT) <= {max_pairs})
         FROM (
             SELECT gt.source1_entity_id, gt.matched_entity_id, s1.entity_id as s1_id, {src}.entity_id as s2_id,
                    c1.s1_size, c2.s2_size
