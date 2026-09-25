@@ -192,7 +192,7 @@ class PipelineConfig:
     TOP_K_ADDRESS: int = 10
     """Maximum candidates from the char-n-gram address similarity pass."""
 
-    NGRAM_CHUNK_SIZE: int = 512
+    NGRAM_CHUNK_SIZE: int = 256
     """
     Number of S1 query vectors processed in a single batch during
     sparse cosine-similarity retrieval.  Avoids materializing the full
@@ -217,7 +217,7 @@ class PipelineConfig:
     Only enable after validation proves it improves candidate recall.
     """
 
-    MAX_CANDIDATES_PER_ENTITY: int = 100
+    MAX_CANDIDATES_PER_ENTITY: int = 50
     """
     Hard ceiling on candidates per S1 entity after union of all passes.
     Protects against pathological cases (e.g., very common business names)
@@ -230,13 +230,13 @@ class PipelineConfig:
     # 2h. Feature engineering configuration
     # ------------------------------------------------------------------
 
-    MAX_PAIRWISE_BATCH_SIZE: int = 50_000
+    MAX_PAIRWISE_BATCH_SIZE: int = 20_000
     """
     Maximum number of candidate pairs processed in one feature-computation
     batch.  Prevents large intermediate DataFrames from exhausting RAM.
     """
 
-    MAX_FEATURE_BATCH_SIZE: int = 50_000
+    MAX_FEATURE_BATCH_SIZE: int = 20_000
     """
     Maximum number of pairs scored by RapidFuzz in one vectorized call.
     Mirrors MAX_PAIRWISE_BATCH_SIZE but can be tuned independently.
@@ -474,3 +474,13 @@ class PipelineConfig:
 #: The single importable config instance.
 #: Import as:  ``from src.config import cfg``
 cfg: PipelineConfig = PipelineConfig()
+
+def log_memory(stage: str) -> None:
+    """Print memory usage for diagnostics."""
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / (1024 * 1024)
+        print(f"[MEMORY] {stage}: {mem_mb:.2f} MB")
+    except ImportError:
+        pass

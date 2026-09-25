@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from src.config import cfg
+from src.config import cfg, log_memory
 from src.preprocessing import (
     load_training_data,
     load_test_data,
@@ -64,11 +64,15 @@ def run():
     print(f"- S2 rows: {len(s2_train)}")
     print(f"- S3 rows: {len(s3_train)}")
     
+    log_memory("after loading")
+    
     # -----------------------------------------------------------------------
     # 2. Candidate Generation (Training)
     # -----------------------------------------------------------------------
     logger.info("Generating training candidates...")
     candidates_train = generate_candidates(s1_train, s2_train, s3_train, cfg)
+    
+    log_memory("after candidate generation")
     
     gt_dict = parse_ground_truth_matches(gt, cfg)
     c_recall_stats, _, _, _ = evaluate_candidate_recall(candidates_train, gt_dict, cfg)
@@ -100,23 +104,31 @@ def run():
     mask_train = candidates_train[COL_S1_ID].isin(train_s1_ids)
     mask_val = candidates_train[COL_S1_ID].isin(val_s1_ids)
     
-    cands_t = candidates_train[mask_train].copy()
-    cands_v = candidates_train[mask_val].copy()
-    
     # -----------------------------------------------------------------------
     # 4. Label Generation
     # -----------------------------------------------------------------------
     logger.info("Building candidate labels...")
-    y_train = build_candidate_labels(cands_t, gt, cfg)
-    y_val = build_candidate_labels(cands_v, gt, cfg)
+    y_train = build_candidate_labels(candidates_train[mask_train], gt, cfg)
+    y_val = build_candidate_labels(candidates_train[mask_val], gt, cfg)
     
     # -----------------------------------------------------------------------
     # 5. Feature Generation
     # -----------------------------------------------------------------------
     logger.info("Generating training features...")
-    X_train = generate_features(s1_train, s2_train, s3_train, cands_t, cfg)
+    log_memory("before feature generation")
+    X_train = generate_features(s1_train, s2_train, s3_train, candidates_train[mask_train], cfg)
+    
+    cands_v = candidates_train[mask_val].reset_index(drop=True)
+    
+    # Release full candidate DataFrame
+    del candidates_train, mask_train, mask_val
+    import gc
+    gc.collect()
+    log_memory("after train feature generation")
+    
     logger.info("Generating validation features...")
     X_val = generate_features(s1_train, s2_train, s3_train, cands_v, cfg)
+    log_memory("after validation feature generation")
     
     # -----------------------------------------------------------------------
     # 6. LightGBM Training
@@ -128,6 +140,12 @@ def run():
         
     matcher = EntityMatcher(cfg)
     matcher.fit(X_train, y_train, X_val, y_val)
+    
+    # X_train is no longer needed after training
+    del X_train, y_train
+    import gc
+    gc.collect()
+    log_memory("after LightGBM")
     
     if cfg.USE_GPU:
         logger.info("GPU status after training:\n" + get_nvidia_smi_output())
@@ -189,6 +207,7 @@ def run():
     logger.info("Generating test features...")
     X_test = generate_features(s1_test, s2_test, s3_test, candidates_test, cfg)
     
+    log_memory("before test inference")
     logger.info("Predicting test probabilities...")
     test_probs = matcher.predict_proba(X_test)
     

@@ -189,32 +189,14 @@ def _retrieve_exact_pass(
     field: str,
     pass_col: str,
     config: PipelineConfig,
-) -> List[Dict[str, Any]]:
+) -> pd.DataFrame:
     """
     Retrieve candidates for all S1 entities using the exact inverted index.
-
-    Parameters
-    ----------
-    s1:
-        Preprocessed Source-1 DataFrame.
-    index:
-        Inverted index from ``_build_exact_index``.
-    field:
-        Normalised field column used for lookup.
-    pass_col:
-        Name of the retrieval-pass indicator column
-        (e.g. ``COL_EX_NAME``).
-    config:
-        Pipeline configuration.
-
-    Returns
-    -------
-    list of dict
-        One dict per candidate pair found.  Each dict contains at minimum:
-        ``source1_entity_id``, ``matched_entity_id``, ``matched_source``,
-        and ``pass_col: True``.
     """
-    records: List[Dict[str, Any]] = []
+    out_s1 = []
+    out_cand = []
+    out_src = []
+    
     eid_col = config.COL_ENTITY_ID
     s1_ids: List[str] = s1[eid_col].tolist()
     field_vals: List[str] = s1[field].fillna("").tolist()
@@ -224,14 +206,16 @@ def _retrieve_exact_pass(
             continue  # empty normalised value -- skip
         matches = index.get(val, [])
         for (matched_id, matched_source) in matches:
-            records.append({
-                COL_S1_ID:    s1_id,
-                COL_CAND_ID:  matched_id,
-                COL_CAND_SRC: matched_source,
-                pass_col:     True,
-            })
+            out_s1.append(s1_id)
+            out_cand.append(matched_id)
+            out_src.append(matched_source)
 
-    return records
+    return pd.DataFrame({
+        COL_S1_ID: out_s1,
+        COL_CAND_ID: out_cand,
+        COL_CAND_SRC: pd.Series(out_src, dtype="category"),
+        pass_col: True,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -406,57 +390,26 @@ def _retrieve_ngram_pass(
     score_col: str,
     pass_col: str,
     config: PipelineConfig,
-) -> List[Dict[str, Any]]:
+) -> pd.DataFrame:
     """
     Retrieve n-gram candidates for all S1 entities using chunked sparse
-    cosine-similarity retrieval.
-
-    Memory safety
-    -------------
-    S1 records are processed in chunks of ``config.NGRAM_CHUNK_SIZE``.
-    For each chunk of size C, the intermediate dense-equivalent work is:
-    C x |S2+S3| floats, which is materialised one row at a time from the
-    sparse CSR product -- never as a full dense matrix.
-
-    Parameters
-    ----------
-    s1:
-        Preprocessed Source-1 DataFrame.
-    vectorizer:
-        Fitted TF-IDF vectorizer (from ``_build_ngram_index``).
-    X_corpus:
-        L2-normalised TF-IDF matrix of the S2+S3 corpus.
-    corpus_ids, corpus_sources:
-        Parallel lists giving entity_id and source label for each corpus row.
-    field:
-        Normalised column used as query text.
-    top_k:
-        Maximum candidates per S1 per pass.
-    min_sim:
-        Minimum cosine similarity threshold.
-    score_col:
-        Name of the score column to store (e.g. ``COL_NG_NAME_SC``).
-    pass_col:
-        Name of the pass-indicator column (e.g. ``COL_NG_NAME``).
-    config:
-        Pipeline configuration.
-
-    Returns
-    -------
-    list of dict
-        One dict per candidate pair.
+    cosine-similarity retrieval. Returns a DataFrame instead of dicts.
     """
     # Guard: if vectorizer has no vocabulary (empty corpus), return nothing.
     if not hasattr(vectorizer, "vocabulary_") or X_corpus.shape[1] == 0:
-        return []
+        return pd.DataFrame()
 
-    records: List[Dict[str, Any]] = []
     eid_col = config.COL_ENTITY_ID
     chunk_size = config.NGRAM_CHUNK_SIZE
 
     s1_ids: List[str] = s1[eid_col].tolist()
     s1_texts: List[str] = s1[field].fillna("").tolist()
     n_s1 = len(s1_ids)
+    
+    out_s1 = []
+    out_cand = []
+    out_src = []
+    out_scores = []
 
     for chunk_start in range(0, n_s1, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_s1)
@@ -471,10 +424,7 @@ def _retrieve_ngram_pass(
         # Transform queries to TF-IDF vectors (sparse)
         X_query: csr_matrix = vectorizer.transform(chunk_texts)
 
-        # Sparse cosine similarity: (chunk_size, n_features) @ (n_features, N_corpus)
-        # Result is a sparse CSR matrix (chunk_size, N_corpus).
-        # Only non-zero entries correspond to S1 records that share at least
-        # one character n-gram with a corpus record.
+        # Sparse cosine similarity
         sim_csr: csr_matrix = (X_query @ X_corpus.T).tocsr()
 
         # Extract top-K per row
@@ -485,15 +435,18 @@ def _retrieve_ngram_pass(
                 continue  # S1 record had empty text -- skip
             s1_id = chunk_s1_ids[row_idx]
             for col_idx, score in zip(col_indices, scores):
-                records.append({
-                    COL_S1_ID:    s1_id,
-                    COL_CAND_ID:  corpus_ids[col_idx],
-                    COL_CAND_SRC: corpus_sources[col_idx],
-                    pass_col:     True,
-                    score_col:    float(score),
-                })
+                out_s1.append(s1_id)
+                out_cand.append(corpus_ids[col_idx])
+                out_src.append(corpus_sources[col_idx])
+                out_scores.append(float(score))
 
-    return records
+    return pd.DataFrame({
+        COL_S1_ID: out_s1,
+        COL_CAND_ID: out_cand,
+        COL_CAND_SRC: pd.Series(out_src, dtype="category"),
+        pass_col: True,
+        score_col: pd.Series(out_scores, dtype=np.float32),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -501,70 +454,48 @@ def _retrieve_ngram_pass(
 # ---------------------------------------------------------------------------
 
 def _merge_candidate_records(
-    record_lists: List[List[Dict[str, Any]]],
-) -> Dict[_CandKey, Dict[str, Any]]:
+    record_dfs: List[pd.DataFrame],
+) -> pd.DataFrame:
     """
-    Merge candidate records from multiple retrieval passes into a single
-    dictionary keyed by ``(source1_entity_id, matched_entity_id, matched_source)``.
-
-    When the same pair appears in multiple passes:
-    - Boolean pass flags are OR-ed (True wins).
-    - Similarity scores are max-merged (best score wins).
-
-    Parameters
-    ----------
-    record_lists:
-        One list per retrieval pass.  Each list contains dicts produced
-        by ``_retrieve_exact_pass`` or ``_retrieve_ngram_pass``.
-
-    Returns
-    -------
-    dict
-        ``{(s1_id, matched_id, source): merged_candidate_dict}``
+    Merge candidate records from multiple retrieval passes into a single DataFrame.
     """
-    merged: Dict[_CandKey, Dict[str, Any]] = {}
+    dfs = [df for df in record_dfs if not df.empty]
+    if not dfs:
+        return pd.DataFrame(columns=[
+            COL_S1_ID, COL_CAND_ID, COL_CAND_SRC,
+            COL_EX_NAME, COL_EX_ADDR, COL_NG_NAME, COL_NG_ADDR,
+            COL_NG_NAME_SC, COL_NG_ADDR_SC, COL_PASS_COUNT,
+        ])
 
-    bool_cols  = {COL_EX_NAME, COL_EX_ADDR, COL_NG_NAME, COL_NG_ADDR}
-    score_cols = {COL_NG_NAME_SC, COL_NG_ADDR_SC}
+    combined = pd.concat(dfs, ignore_index=True)
 
-    for records in record_lists:
-        for rec in records:
-            key: _CandKey = (
-                rec[COL_S1_ID],
-                rec[COL_CAND_ID],
-                rec[COL_CAND_SRC],
-            )
-            if key not in merged:
-                # Initialise with all defaults
-                merged[key] = {
-                    COL_S1_ID:      rec[COL_S1_ID],
-                    COL_CAND_ID:    rec[COL_CAND_ID],
-                    COL_CAND_SRC:   rec[COL_CAND_SRC],
-                    COL_EX_NAME:    False,
-                    COL_EX_ADDR:    False,
-                    COL_NG_NAME:    False,
-                    COL_NG_ADDR:    False,
-                    COL_NG_NAME_SC: 0.0,
-                    COL_NG_ADDR_SC: 0.0,
-                }
-            entry = merged[key]
-            for col in bool_cols:
-                if rec.get(col):
-                    entry[col] = True
-            for col in score_cols:
-                if col in rec:
-                    entry[col] = max(entry[col], rec[col])
+    # Ensure columns exist and fill NAs
+    bool_cols = [COL_EX_NAME, COL_EX_ADDR, COL_NG_NAME, COL_NG_ADDR]
+    for col in bool_cols:
+        if col not in combined.columns:
+            combined[col] = False
+        else:
+            combined[col] = combined[col].fillna(False)
+
+    score_cols = [COL_NG_NAME_SC, COL_NG_ADDR_SC]
+    for col in score_cols:
+        if col not in combined.columns:
+            combined[col] = 0.0
+        else:
+            combined[col] = combined[col].fillna(0.0).astype(np.float32)
+
+    # Group and aggregate
+    grouped = combined.groupby([COL_S1_ID, COL_CAND_ID, COL_CAND_SRC], observed=True, as_index=False).max()
 
     # Compute pass count
-    for entry in merged.values():
-        entry[COL_PASS_COUNT] = int(
-            entry[COL_EX_NAME]
-            + entry[COL_EX_ADDR]
-            + entry[COL_NG_NAME]
-            + entry[COL_NG_ADDR]
-        )
+    grouped[COL_PASS_COUNT] = (
+        grouped[COL_EX_NAME].astype(np.int8) + 
+        grouped[COL_EX_ADDR].astype(np.int8) + 
+        grouped[COL_NG_NAME].astype(np.int8) + 
+        grouped[COL_NG_ADDR].astype(np.int8)
+    )
 
-    return merged
+    return grouped
 
 
 # ---------------------------------------------------------------------------
@@ -572,60 +503,16 @@ def _merge_candidate_records(
 # ---------------------------------------------------------------------------
 
 def _apply_candidate_cap(
-    merged: Dict[_CandKey, Dict[str, Any]],
+    df: pd.DataFrame,
     config: PipelineConfig,
     country_lookup: Optional[Dict[str, str]] = None,
     s1_country_lookup: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
     """
-    Convert the merged candidate dictionary to a DataFrame and enforce
-    ``MAX_CANDIDATES_PER_ENTITY`` per S1 entity.
-
-    Capping priority (descending importance)
-    -----------------------------------------
-    1. Candidates from at least one exact pass are preferred over pure
-       n-gram candidates.  Within the exact tier:
-       a. Exact name takes priority over exact address (stronger signal).
-    2. Among n-gram-only candidates: ranked by the best similarity score
-       (max of name and address scores).
-    3. Deterministic tie-breaker: ``matched_entity_id`` ascending (lexicographic).
-
-    This policy ensures that strong exact-match evidence is never evicted
-    by weaker fuzzy matches when the cap is applied.
-
-    Country constraint
-    ------------------
-    If ``config.USE_COUNTRY_AS_RETRIEVAL_CONSTRAINT`` is True AND both
-    ``country_lookup`` and ``s1_country_lookup`` are provided, candidate
-    pairs where the S1 country_norm differs from the candidate country_norm
-    are removed.  Pairs where either country is empty are kept (conservative).
-
-    Parameters
-    ----------
-    merged:
-        Output of ``_merge_candidate_records``.
-    config:
-        Pipeline configuration.
-    country_lookup:
-        Optional dict ``{entity_id: country_norm}`` for S2+S3 records.
-    s1_country_lookup:
-        Optional dict ``{entity_id: country_norm}`` for S1 records.
-
-    Returns
-    -------
-    pd.DataFrame
-        Final candidate DataFrame with all candidate columns.
-        Deterministically ordered by (s1_id, priority_rank, matched_entity_id).
+    Apply MAX_CANDIDATES_PER_ENTITY to the DataFrame.
     """
-    if not merged:
-        return pd.DataFrame(columns=[
-            COL_S1_ID, COL_CAND_ID, COL_CAND_SRC,
-            COL_EX_NAME, COL_EX_ADDR, COL_NG_NAME, COL_NG_ADDR,
-            COL_NG_NAME_SC, COL_NG_ADDR_SC, COL_PASS_COUNT,
-        ])
-
-    rows = list(merged.values())
-    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
 
     # --- Optional country constraint ---
     if (
@@ -635,7 +522,6 @@ def _apply_candidate_cap(
     ):
         s1_countries = df[COL_S1_ID].map(s1_country_lookup).fillna("")
         cand_countries = df[COL_CAND_ID].map(country_lookup).fillna("")
-        # Keep if either side is unknown (empty) OR countries match
         keep_mask = (s1_countries == "") | (cand_countries == "") | (
             s1_countries == cand_countries
         )
@@ -648,34 +534,24 @@ def _apply_candidate_cap(
 
     max_cands = config.MAX_CANDIDATES_PER_ENTITY
 
-    # --- Priority sort key (lower = higher priority) ---
-    # Tier 0: exact name match (strongest)
-    # Tier 1: exact address match (strong)
-    # Tier 2: n-gram only
-    # Within tier: best similarity score DESC, then matched_entity_id ASC
-    df["_tier"] = np.where(
+    tier = np.where(
         df[COL_EX_NAME], 0,
         np.where(df[COL_EX_ADDR], 1, 2)
     )
-    df["_best_score"] = df[[COL_NG_NAME_SC, COL_NG_ADDR_SC]].max(axis=1)
+    best_score = df[[COL_NG_NAME_SC, COL_NG_ADDR_SC]].max(axis=1)
 
-    # Apply cap per S1 entity using deterministic sort
-    df = (
-        df.sort_values(
-            ["_tier", "_best_score", COL_CAND_ID],
-            ascending=[True, False, True],
-        )
-        .groupby(COL_S1_ID, sort=False)
-        .head(max_cands)
-        .drop(columns=["_tier", "_best_score"])
-        .reset_index(drop=True)
+    df = df.assign(_tier=tier, _best_score=best_score)
+    df.sort_values(
+        by=["_tier", "_best_score", COL_CAND_ID],
+        ascending=[True, False, True],
+        inplace=True
     )
 
-    # Final deterministic ordering for reproducibility
-    df = df.sort_values(
-        [COL_S1_ID, COL_CAND_ID, COL_CAND_SRC],
-        ascending=True,
-    ).reset_index(drop=True)
+    df = df.groupby(COL_S1_ID, sort=False).head(max_cands)
+    df.drop(columns=["_tier", "_best_score"], inplace=True)
+
+    df.sort_values([COL_S1_ID, COL_CAND_ID, COL_CAND_SRC], inplace=True)
+    df.reset_index(drop=True, inplace=True)
 
     return df
 

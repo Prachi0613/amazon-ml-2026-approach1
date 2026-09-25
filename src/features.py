@@ -149,12 +149,12 @@ def _compute_string_features(s1_str: pd.Series, cand_str: pd.Series, prefix: str
     token_vals = [calc_token(a, b) for a, b in zip(s1_clean, cand_clean)]
 
     df = pd.DataFrame({
-        f"{prefix}_missing_s1": miss_s1,
-        f"{prefix}_missing_cand": miss_cand,
-        f"{prefix}_exact": exact.astype(np.float32),
-        f"{prefix}_len_s1": len_s1.astype(np.float32),
-        f"{prefix}_len_cand": len_cand.astype(np.float32),
-        f"{prefix}_len_diff_abs": len_diff.astype(np.float32),
+        f"{prefix}_missing_s1": miss_s1.astype(np.int8),
+        f"{prefix}_missing_cand": miss_cand.astype(np.int8),
+        f"{prefix}_exact": exact.astype(np.int8),
+        f"{prefix}_len_s1": len_s1.astype(np.int16),
+        f"{prefix}_len_cand": len_cand.astype(np.int16),
+        f"{prefix}_len_diff_abs": len_diff.astype(np.int16),
         f"{prefix}_len_ratio": len_ratio.astype(np.float32),
         f"{prefix}_jaro": np.array(jaro_vals, dtype=np.float32),
         f"{prefix}_fuzz_ratio": np.array(fuzz_vals, dtype=np.float32),
@@ -227,55 +227,60 @@ def generate_features(
         mask_s2 = (cand_srcs == SOURCE_S2)
         mask_s3 = (cand_srcs == SOURCE_S3)
         
-        cand_data = pd.DataFrame(index=range(len(chunk)), columns=needed_cols[1:])
+        cand_name = np.empty(len(chunk), dtype=object)
+        cand_addr = np.empty(len(chunk), dtype=object)
+        cand_ctry = np.empty(len(chunk), dtype=object)
         
         if mask_s2.any():
             s2_subset = s2_indexed.loc[cand_ids[mask_s2]].reset_index(drop=True)
-            cand_data.loc[mask_s2, config.COL_NAME_NORM] = s2_subset[config.COL_NAME_NORM].values
-            cand_data.loc[mask_s2, config.COL_ADDRESS_NORM] = s2_subset[config.COL_ADDRESS_NORM].values
-            cand_data.loc[mask_s2, config.COL_COUNTRY_NORM] = s2_subset[config.COL_COUNTRY_NORM].values
+            cand_name[mask_s2] = s2_subset[config.COL_NAME_NORM].values
+            cand_addr[mask_s2] = s2_subset[config.COL_ADDRESS_NORM].values
+            cand_ctry[mask_s2] = s2_subset[config.COL_COUNTRY_NORM].values
             
         if mask_s3.any():
             s3_subset = s3_indexed.loc[cand_ids[mask_s3]].reset_index(drop=True)
-            cand_data.loc[mask_s3, config.COL_NAME_NORM] = s3_subset[config.COL_NAME_NORM].values
-            cand_data.loc[mask_s3, config.COL_ADDRESS_NORM] = s3_subset[config.COL_ADDRESS_NORM].values
-            cand_data.loc[mask_s3, config.COL_COUNTRY_NORM] = s3_subset[config.COL_COUNTRY_NORM].values
+            cand_name[mask_s3] = s3_subset[config.COL_NAME_NORM].values
+            cand_addr[mask_s3] = s3_subset[config.COL_ADDRESS_NORM].values
+            cand_ctry[mask_s3] = s3_subset[config.COL_COUNTRY_NORM].values
+            
+        cand_name_s = pd.Series(cand_name, dtype=object, index=chunk.index)
+        cand_addr_s = pd.Series(cand_addr, dtype=object, index=chunk.index)
+        cand_ctry_s = pd.Series(cand_ctry, dtype=object, index=chunk.index)
             
         # 4. Compute Name Features
         name_feats = _compute_string_features(
             s1_data[config.COL_NAME_NORM], 
-            cand_data[config.COL_NAME_NORM], 
+            cand_name_s, 
             prefix="name"
         )
         
         # 5. Compute Address Features
         addr_feats = _compute_string_features(
             s1_data[config.COL_ADDRESS_NORM], 
-            cand_data[config.COL_ADDRESS_NORM], 
+            cand_addr_s, 
             prefix="addr"
         )
         
         # 6. Compute Country Features
         s1_ctry = s1_data[config.COL_COUNTRY_NORM].fillna("")
-        cand_ctry = cand_data[config.COL_COUNTRY_NORM].fillna("")
+        cand_ctry_series = cand_ctry_s.fillna("")
         
-        ctry_miss_s1 = (s1_ctry == "").astype(np.float32)
-        ctry_miss_cand = (cand_ctry == "").astype(np.float32)
-        ctry_exact = ((s1_ctry == cand_ctry) & (s1_ctry != "")).astype(np.float32)
+        ctry_miss_s1 = (s1_ctry == "").astype(np.int8)
+        ctry_miss_cand = (cand_ctry_series == "").astype(np.int8)
+        ctry_exact = ((s1_ctry == cand_ctry_series) & (s1_ctry != "")).astype(np.int8)
         
         # 7. Source Indicators
-        is_s2 = mask_s2.astype(np.float32)
-        is_s3 = mask_s3.astype(np.float32)
+        is_s2 = mask_s2.astype(np.int8)
+        is_s3 = mask_s3.astype(np.int8)
         
         # 8. Retrieval Features
-        # Extract from the original candidates chunk and convert to float32
-        ret_ex_name = chunk.get(COL_EX_NAME, pd.Series(False, index=chunk.index)).astype(np.float32)
-        ret_ex_addr = chunk.get(COL_EX_ADDR, pd.Series(False, index=chunk.index)).astype(np.float32)
-        ret_ng_name = chunk.get(COL_NG_NAME, pd.Series(False, index=chunk.index)).astype(np.float32)
-        ret_ng_addr = chunk.get(COL_NG_ADDR, pd.Series(False, index=chunk.index)).astype(np.float32)
+        ret_ex_name = chunk.get(COL_EX_NAME, pd.Series(False, index=chunk.index)).astype(np.int8)
+        ret_ex_addr = chunk.get(COL_EX_ADDR, pd.Series(False, index=chunk.index)).astype(np.int8)
+        ret_ng_name = chunk.get(COL_NG_NAME, pd.Series(False, index=chunk.index)).astype(np.int8)
+        ret_ng_addr = chunk.get(COL_NG_ADDR, pd.Series(False, index=chunk.index)).astype(np.int8)
         ret_ng_name_sc = chunk.get(COL_NG_NAME_SC, pd.Series(0.0, index=chunk.index)).astype(np.float32)
         ret_ng_addr_sc = chunk.get(COL_NG_ADDR_SC, pd.Series(0.0, index=chunk.index)).astype(np.float32)
-        ret_pass = chunk.get(COL_PASS_COUNT, pd.Series(0.0, index=chunk.index)).astype(np.float32)
+        ret_pass = chunk.get(COL_PASS_COUNT, pd.Series(0.0, index=chunk.index)).astype(np.int8)
         
         # 9. Combine all into chunk features
         chunk_feats = pd.DataFrame({

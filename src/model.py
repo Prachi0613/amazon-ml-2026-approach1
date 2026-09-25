@@ -183,7 +183,11 @@ class EntityMatcher:
         params["device_type"] = device_type
 
         # Prepare LightGBM Datasets
-        dtrain = lgb.Dataset(train_features, label=y_train)
+        dtrain = lgb.Dataset(train_features, label=y_train, free_raw_data=True)
+        # Delete train_features to save memory immediately
+        del train_features
+        import gc; gc.collect()
+        
         valid_sets = [dtrain]
         valid_names = ["train"]
 
@@ -192,7 +196,10 @@ class EntityMatcher:
         if X_val is not None and y_val is not None:
             self._validate_features(X_val)
             val_features = X_val[self.feature_cols]
-            dval = lgb.Dataset(val_features, label=y_val, reference=dtrain)
+            dval = lgb.Dataset(val_features, label=y_val, reference=dtrain, free_raw_data=True)
+            del val_features
+            gc.collect()
+            
             valid_sets.append(dval)
             valid_names.append("valid")
             
