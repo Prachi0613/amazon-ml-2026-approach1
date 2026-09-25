@@ -32,8 +32,8 @@ class DiskBlocker:
         self.conn.close()
 
     def generate_exact_blocks(self):
-        """Populate exact name and address blocks."""
-        logger.info("Generating exact match blocking keys...")
+        """Populate exact name, exact address, and prefix4+house blocks (Phase 3B)."""
+        logger.info("Generating exact match and prefix4+house blocking keys...")
         
         for src in ['s1', 's2', 's3']:
             self.conn.execute(f"DELETE FROM {src}_blocks")
@@ -54,39 +54,16 @@ class DiskBlocker:
             WHERE addr_norm IS NOT NULL AND addr_norm != ''
             """)
             
-            # 3. Name Prefix 3
+            # 3. name_prefix_4 + addr_house_num
             self.conn.execute(f"""
             INSERT INTO {src}_blocks
-            SELECT entity_id, 'name_prefix_3', SUBSTRING(name_norm, 1, 3) 
+            SELECT entity_id, 'prefix4_house', SUBSTRING(name_norm, 1, 4) || '_' || split_part(addr_norm, ' ', 1) 
             FROM {src} 
-            WHERE LENGTH(name_norm) >= 3
+            WHERE name_norm IS NOT NULL AND name_norm != ''
+              AND addr_norm IS NOT NULL AND addr_norm != ''
             """)
             
-            # 4. Name Prefix 4
-            self.conn.execute(f"""
-            INSERT INTO {src}_blocks
-            SELECT entity_id, 'name_prefix_4', SUBSTRING(name_norm, 1, 4) 
-            FROM {src} 
-            WHERE LENGTH(name_norm) >= 4
-            """)
-            
-            # 5. Address Prefix 3
-            self.conn.execute(f"""
-            INSERT INTO {src}_blocks
-            SELECT entity_id, 'addr_prefix_3', SUBSTRING(addr_norm, 1, 3) 
-            FROM {src} 
-            WHERE LENGTH(addr_norm) >= 3
-            """)
-            
-            # 6. Address House Number (assuming first token of address is house number)
-            self.conn.execute(f"""
-            INSERT INTO {src}_blocks
-            SELECT entity_id, 'addr_house_num', split_part(addr_norm, ' ', 1) 
-            FROM {src} 
-            WHERE addr_norm IS NOT NULL AND addr_norm != ''
-            """)
-            
-        logger.info("Exact and cheap blocking keys populated.")
+        logger.info("Phase 3B blocking keys populated.")
 
     def profile_blocks(self, block_type: str, matched_source: str) -> pd.DataFrame:
         """
