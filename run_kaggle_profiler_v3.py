@@ -23,18 +23,24 @@ def check_db():
     return conn
 
 def profile_v3_poc(conn, max_pairs: int = 50_000):
-    rule = "name_prefix_4"
+    rule = "name_prefix_3 + name_length_bucket"
     src = "s2"
+    
+    # This is a profiling-only experiment to determine whether adding 
+    # a coarse name length bucket (LENGTH / 5) improves the selectivity 
+    # of name_prefix_3 while retaining acceptable ground-truth coverage.
+    
     logger.info(f"--- V3 Bounded Profiling POC: {rule} against {src} ---")
     start_time = time.time()
     
+    # Bucket definition: length divided by 5 (e.g., len 1-4 -> 0, 5-9 -> 1, etc.)
+    key_expr = "SUBSTRING(name_norm, 1, 3) || '_' || CAST(LENGTH(name_norm)/5 AS VARCHAR)"
+    
     # 1. Bounded Group By using 64-bit integer hashes
-    # Strings consume massive memory in hash tables. 
-    # A 64-bit hash (hash() in DuckDB) for ~5M entities has ~0 probability of collision.
     logger.info("Computing 64-bit integer hashes for s1 counts...")
     conn.execute(f"""
     CREATE TEMP TABLE tmp_s1_cnt AS 
-    SELECT hash(SUBSTRING(name_norm, 1, 4)) as block_key, COUNT(*) as s1_size 
+    SELECT hash({key_expr}) as block_key, COUNT(*) as s1_size 
     FROM s1 
     WHERE name_norm IS NOT NULL AND name_norm != ''
     GROUP BY 1
@@ -43,7 +49,7 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
     logger.info(f"Computing 64-bit integer hashes for {src} counts...")
     conn.execute(f"""
     CREATE TEMP TABLE tmp_s2_cnt AS 
-    SELECT hash(SUBSTRING(name_norm, 1, 4)) as block_key, COUNT(*) as s2_size 
+    SELECT hash({key_expr}) as block_key, COUNT(*) as s2_size 
     FROM {src} 
     WHERE name_norm IS NOT NULL AND name_norm != ''
     GROUP BY 1
@@ -67,7 +73,6 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
     logger.info(f"Estimated pairs: {total_est} | Oversized blocks: {oversized}")
     
     # 3. Ground Truth Coverage via Bounded Chunks
-    # Avoid a giant join across all 7.6M GT edges + string lookups.
     src_upper = src.upper()
     total_true = conn.execute(f"SELECT COUNT(*) FROM ground_truth WHERE matched_entity_id LIKE '{src_upper}-%'").fetchone()[0]
     
@@ -80,7 +85,6 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
     
     while offset < total_true:
         chunk_start = time.time()
-        # Evaluate exact hits for the current chunk
         conn.execute(f"""
         CREATE TEMP TABLE tmp_gt_chunk AS 
         SELECT source1_entity_id, matched_entity_id
@@ -96,7 +100,7 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
         FROM tmp_gt_chunk gt
         JOIN s1 ON gt.source1_entity_id = s1.entity_id
         JOIN {src} s2 ON gt.matched_entity_id = s2.entity_id
-        WHERE hash(SUBSTRING(s1.name_norm, 1, 4)) = hash(SUBSTRING(s2.name_norm, 1, 4))
+        WHERE hash({key_expr.replace('name_norm', 's1.name_norm')}) = hash({key_expr.replace('name_norm', 's2.name_norm')})
         """).fetchone()[0]
         raw_hits += hits
         
@@ -106,9 +110,9 @@ def profile_v3_poc(conn, max_pairs: int = 50_000):
         FROM tmp_gt_chunk gt
         JOIN s1 ON gt.source1_entity_id = s1.entity_id
         JOIN {src} s2 ON gt.matched_entity_id = s2.entity_id
-        JOIN tmp_s1_cnt c1 ON hash(SUBSTRING(s1.name_norm, 1, 4)) = c1.block_key
-        JOIN tmp_s2_cnt c2 ON hash(SUBSTRING(s2.name_norm, 1, 4)) = c2.block_key
-        WHERE hash(SUBSTRING(s1.name_norm, 1, 4)) = hash(SUBSTRING(s2.name_norm, 1, 4))
+        JOIN tmp_s1_cnt c1 ON hash({key_expr.replace('name_norm', 's1.name_norm')}) = c1.block_key
+        JOIN tmp_s2_cnt c2 ON hash({key_expr.replace('name_norm', 's2.name_norm')}) = c2.block_key
+        WHERE hash({key_expr.replace('name_norm', 's1.name_norm')}) = hash({key_expr.replace('name_norm', 's2.name_norm')})
           AND (CAST(c1.s1_size AS BIGINT) * CAST(c2.s2_size AS BIGINT)) <= {max_pairs}
         """).fetchone()[0]
         safe_hits += s_hits
