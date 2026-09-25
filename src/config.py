@@ -242,6 +242,22 @@ class PipelineConfig:
     Mirrors MAX_PAIRWISE_BATCH_SIZE but can be tuned independently.
     """
 
+    S1_PROCESS_CHUNK_SIZE: int = 50_000
+    """
+    Number of S1 entities to process at a time during candidate generation.
+    This limits the intermediate number of uncapped candidates in memory.
+    """
+
+    TARGET_MAX_RAM_GB: float = 12.0
+    """
+    Conservative target for maximum RAM usage on Kaggle to prevent OOM.
+    """
+
+    MEMORY_SAFETY_FRACTION: float = 0.80
+    """
+    Fraction of available RAM at which point defensive actions should be taken.
+    """
+
     # ------------------------------------------------------------------
     # 2i. LightGBM configuration
     # ------------------------------------------------------------------
@@ -481,6 +497,7 @@ def log_memory(stage: str) -> None:
         import psutil
         process = psutil.Process(os.getpid())
         mem_mb = process.memory_info().rss / (1024 * 1024)
-        print(f"[MEMORY] {stage}: {mem_mb:.2f} MB")
+        avail_mb = psutil.virtual_memory().available / (1024 * 1024)
+        print(f"[MEMORY] {stage}: Used {mem_mb:.2f} MB | Available {avail_mb:.2f} MB")
     except ImportError:
         pass

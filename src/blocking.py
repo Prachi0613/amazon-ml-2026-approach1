@@ -600,138 +600,93 @@ def generate_candidates(
 ) -> pd.DataFrame:
     """
     Run all four retrieval passes and return the unified candidate DataFrame.
-
-    Parameters
-    ----------
-    s1, s2, s3:
-        Preprocessed DataFrames (output of ``preprocessing.preprocess_source``).
-        Must contain ``entity_id``, ``name_norm``, ``address_norm``,
-        ``country_norm``.
-    config:
-        Pipeline configuration.
-
-    Returns
-    -------
-    pd.DataFrame
-        Candidate pairs with columns:
-
-        source1_entity_id   str
-        matched_entity_id   str
-        matched_source      str   ("S2" or "S3")
-        from_exact_name     bool
-        from_exact_address  bool
-        from_ngram_name     bool
-        from_ngram_address  bool
-        ngram_name_score    float32
-        ngram_address_score float32
-        retrieval_pass_count int
-
-        One row per unique (source1_entity_id, matched_entity_id, matched_source)
-        triple. Sorted deterministically by (source1_entity_id, matched_entity_id,
-        matched_source).
-
-    Notes
-    -----
-    - Country constraint is applied only if
-      ``config.USE_COUNTRY_AS_RETRIEVAL_CONSTRAINT`` is True.
-    - Candidates per S1 entity are capped at
-      ``config.MAX_CANDIDATES_PER_ENTITY``.
     """
     t0 = time.perf_counter()
+    import gc
+    from src.config import log_memory
+    
     name_field = config.COL_NAME_NORM
     addr_field = config.COL_ADDRESS_NORM
 
     # ------------------------------------------------------------------
-    # Pass 1: Exact name
+    # Pre-build indexes
     # ------------------------------------------------------------------
-    logger.info("Pass 1: building exact name index ...")
-    t1 = time.perf_counter()
+    logger.info("Building exact name index...")
     exact_name_idx = _build_exact_index(s2, s3, name_field, config)
-    p1_records = _retrieve_exact_pass(s1, exact_name_idx, name_field, COL_EX_NAME, config)
-    logger.info(
-        "Pass 1 done in %.2fs: %d candidate pairs.", time.perf_counter() - t1, len(p1_records)
-    )
-
-    # ------------------------------------------------------------------
-    # Pass 2: Exact address
-    # ------------------------------------------------------------------
-    logger.info("Pass 2: building exact address index ...")
-    t2 = time.perf_counter()
+    
+    logger.info("Building exact address index...")
     exact_addr_idx = _build_exact_index(s2, s3, addr_field, config)
-    p2_records = _retrieve_exact_pass(s1, exact_addr_idx, addr_field, COL_EX_ADDR, config)
-    logger.info(
-        "Pass 2 done in %.2fs: %d candidate pairs.", time.perf_counter() - t2, len(p2_records)
-    )
-
-    # ------------------------------------------------------------------
-    # Pass 3: Character n-gram name retrieval
-    # ------------------------------------------------------------------
-    logger.info(
-        "Pass 3: fitting n-gram name index (ngram=%d-%d, top_k=%d, min_sim=%.2f) ...",
-        config.CHAR_NGRAM_MIN, config.CHAR_NGRAM_MAX,
-        config.TOP_K_NAME, config.MIN_NGRAM_SIMILARITY_NAME,
-    )
-    t3 = time.perf_counter()
+    
+    logger.info("Fitting n-gram name index...")
     name_vect, X_name_corpus, name_ids, name_sources = _build_ngram_index(
         s2, s3, name_field, config
     )
-    p3_records = _retrieve_ngram_pass(
-        s1, name_vect, X_name_corpus, name_ids, name_sources,
-        field=name_field,
-        top_k=config.TOP_K_NAME,
-        min_sim=config.MIN_NGRAM_SIMILARITY_NAME,
-        score_col=COL_NG_NAME_SC,
-        pass_col=COL_NG_NAME,
-        config=config,
-    )
-    logger.info(
-        "Pass 3 done in %.2fs: %d candidate pairs.", time.perf_counter() - t3, len(p3_records)
-    )
-
-    # ------------------------------------------------------------------
-    # Pass 4: Character n-gram address retrieval
-    # ------------------------------------------------------------------
-    logger.info(
-        "Pass 4: fitting n-gram address index (ngram=%d-%d, top_k=%d, min_sim=%.2f) ...",
-        config.CHAR_NGRAM_MIN, config.CHAR_NGRAM_MAX,
-        config.TOP_K_ADDRESS, config.MIN_NGRAM_SIMILARITY_ADDR,
-    )
-    t4 = time.perf_counter()
+    
+    logger.info("Fitting n-gram address index...")
     addr_vect, X_addr_corpus, addr_ids, addr_sources = _build_ngram_index(
         s2, s3, addr_field, config
     )
-    p4_records = _retrieve_ngram_pass(
-        s1, addr_vect, X_addr_corpus, addr_ids, addr_sources,
-        field=addr_field,
-        top_k=config.TOP_K_ADDRESS,
-        min_sim=config.MIN_NGRAM_SIMILARITY_ADDR,
-        score_col=COL_NG_ADDR_SC,
-        pass_col=COL_NG_ADDR,
-        config=config,
-    )
-    logger.info(
-        "Pass 4 done in %.2fs: %d candidate pairs.", time.perf_counter() - t4, len(p4_records)
-    )
-
-    # ------------------------------------------------------------------
-    # Union + deduplication
-    # ------------------------------------------------------------------
-    logger.info("Merging candidate records from all passes ...")
-    merged = _merge_candidate_records([p1_records, p2_records, p3_records, p4_records])
-    logger.info("Unique candidate pairs before cap: %d", len(merged))
-
-    # ------------------------------------------------------------------
-    # Optional country constraint + cap
-    # ------------------------------------------------------------------
+    
     country_lookup = None
     s1_country_lookup = None
     if config.USE_COUNTRY_AS_RETRIEVAL_CONSTRAINT:
         country_lookup = _build_country_lookup(s2, s3, config)
         s1_country_lookup = _build_s1_country_lookup(s1, config)
 
-    candidates_df = _apply_candidate_cap(
-        merged, config, country_lookup, s1_country_lookup
-    )
+    # ------------------------------------------------------------------
+    # Process S1 in chunks
+    # ------------------------------------------------------------------
+    n_s1 = len(s1)
+    chunk_size = config.S1_PROCESS_CHUNK_SIZE
+    capped_chunks = []
+    
+    log_memory("Before S1 candidate chunking")
+
+    for chunk_start in range(0, n_s1, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_s1)
+        s1_chunk = s1.iloc[chunk_start:chunk_end].copy()
+        
+        # 1. Exact name
+        p1 = _retrieve_exact_pass(s1_chunk, exact_name_idx, name_field, COL_EX_NAME, config)
+        # 2. Exact address
+        p2 = _retrieve_exact_pass(s1_chunk, exact_addr_idx, addr_field, COL_EX_ADDR, config)
+        # 3. N-gram name
+        p3 = _retrieve_ngram_pass(
+            s1_chunk, name_vect, X_name_corpus, name_ids, name_sources,
+            field=name_field, top_k=config.TOP_K_NAME, min_sim=config.MIN_NGRAM_SIMILARITY_NAME,
+            score_col=COL_NG_NAME_SC, pass_col=COL_NG_NAME, config=config,
+        )
+        # 4. N-gram address
+        p4 = _retrieve_ngram_pass(
+            s1_chunk, addr_vect, X_addr_corpus, addr_ids, addr_sources,
+            field=addr_field, top_k=config.TOP_K_ADDRESS, min_sim=config.MIN_NGRAM_SIMILARITY_ADDR,
+            score_col=COL_NG_ADDR_SC, pass_col=COL_NG_ADDR, config=config,
+        )
+        
+        # Merge and cap for this chunk only
+        merged = _merge_candidate_records([p1, p2, p3, p4])
+        capped = _apply_candidate_cap(merged, config, country_lookup, s1_country_lookup)
+        
+        capped_chunks.append(capped)
+        
+        # Release temporary objects
+        del p1, p2, p3, p4, merged, s1_chunk
+        gc.collect()
+
+    log_memory("After S1 candidate chunking")
+
+    # Combine all capped chunks
+    if capped_chunks:
+        candidates_df = pd.concat(capped_chunks, ignore_index=True)
+    else:
+        candidates_df = pd.DataFrame(columns=[
+            COL_S1_ID, COL_CAND_ID, COL_CAND_SRC,
+            COL_EX_NAME, COL_EX_ADDR, COL_NG_NAME, COL_NG_ADDR,
+            COL_NG_NAME_SC, COL_NG_ADDR_SC, COL_PASS_COUNT,
+        ])
+        
+    del capped_chunks
+    gc.collect()
 
     total_time = time.perf_counter() - t0
     logger.info(
