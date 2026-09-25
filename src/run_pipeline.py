@@ -29,9 +29,8 @@ logger = logging.getLogger(__name__)
 
 from src.config import cfg
 from src.preprocessing import (
-    load_and_validate_dataframe,
-    normalize_dataframe,
-    preprocess_ground_truth,
+    load_training_data,
+    load_test_data,
 )
 from src.blocking import (
     generate_candidates,
@@ -55,15 +54,7 @@ def run():
     # 1. Load and Preprocess Training Data
     # -----------------------------------------------------------------------
     logger.info("Loading training data...")
-    raw_s1_train = load_and_validate_dataframe(cfg.TRAIN_SOURCE1, cfg)
-    raw_s2_train = load_and_validate_dataframe(cfg.TRAIN_SOURCE2, cfg)
-    raw_s3_train = load_and_validate_dataframe(cfg.TRAIN_SOURCE3, cfg)
-    raw_gt = pd.read_csv(cfg.TRAIN_GROUND_TRUTH, sep=cfg.TSV_SEPARATOR)
-    
-    s1_train = normalize_dataframe(raw_s1_train, cfg)
-    s2_train = normalize_dataframe(raw_s2_train, cfg)
-    s3_train = normalize_dataframe(raw_s3_train, cfg)
-    gt = preprocess_ground_truth(raw_gt, cfg)
+    s1_train, s2_train, s3_train, gt = load_training_data(cfg)
     
     print("\n" + "="*40)
     print("TRAIN DATA")
@@ -182,13 +173,7 @@ def run():
     # 8. Test Data Processing
     # -----------------------------------------------------------------------
     logger.info("Loading test data...")
-    raw_s1_test = load_and_validate_dataframe(cfg.TEST_SOURCE1, cfg)
-    raw_s2_test = load_and_validate_dataframe(cfg.TEST_SOURCE2, cfg)
-    raw_s3_test = load_and_validate_dataframe(cfg.TEST_SOURCE3, cfg)
-    
-    s1_test = normalize_dataframe(raw_s1_test, cfg)
-    s2_test = normalize_dataframe(raw_s2_test, cfg)
-    s3_test = normalize_dataframe(raw_s3_test, cfg)
+    s1_test, s2_test, s3_test = load_test_data(cfg)
     
     logger.info("Generating test candidates...")
     candidates_test = generate_candidates(s1_test, s2_test, s3_test, cfg)
