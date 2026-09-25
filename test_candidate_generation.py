@@ -229,6 +229,49 @@ class TestCandidateGeneration(unittest.TestCase):
         cands_final = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
         self.assertEqual(cands_final, 3) # Still 3, didn't run again
 
+    def test_recover_kaggle_progress(self):
+        """Verify the Kaggle recovery script safely injects the 12 batch markers without side effects."""
+        import recover_phase3b_kaggle_progress
+        
+        # 1. Prepare raw db state mimicking Kaggle before recovery
+        self.conn.execute("INSERT INTO s1 VALUES ('S1-BW-1', 'amazon', 'seattle')")
+        self.conn.execute("INSERT INTO s2 VALUES ('S2-BW-1', 'amazon', 'seattle')")
+        self.conn.execute("INSERT INTO candidates (source1_entity_id, matched_entity_id, matched_source, from_exact_name, from_name_block, score) VALUES ('S1-BW-1', 'S2-BW-1', 's2', TRUE, TRUE, 0.0)")
+        
+        self.conn.execute("CREATE TABLE checkpoints (pass_name VARCHAR PRIMARY KEY)")
+        self.conn.execute("INSERT INTO checkpoints VALUES ('PHASE3B_BLOCKING_KEYS_COMPLETE')")
+        
+        initial_cands = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        
+        # 2. Run recovery script
+        success = recover_phase3b_kaggle_progress.main(db_path=self.db_path)
+        self.assertTrue(success)
+        
+        # 3. Verify exactly 12 markers were injected (plus the 1 existing = 13 total)
+        total_markers = self.conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
+        self.assertEqual(total_markers, 13)
+        
+        for batch_idx in range(12):
+            offset = batch_idx * 50_000
+            exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE pass_name = 'prefix4_house_s2_batch_{batch_idx}_offset_{offset}'").fetchone()[0]
+            self.assertEqual(exists, 1)
+            
+        # 4. Prove it does NOT create the pass-level COMPLETE marker
+        complete_exists = self.conn.execute("SELECT COUNT(*) FROM checkpoints WHERE pass_name = 'prefix4_house_s2_COMPLETE'").fetchone()[0]
+        self.assertEqual(complete_exists, 0)
+        
+        # 5. Prove candidate rows are perfectly untouched
+        final_cands = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        self.assertEqual(initial_cands, final_cands)
+        
+        # 6. Prove idempotence by running again
+        success_again = recover_phase3b_kaggle_progress.main(db_path=self.db_path)
+        self.assertTrue(success_again)
+        
+        # Count should still be strictly 13
+        total_markers_again = self.conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
+        self.assertEqual(total_markers_again, 13)
+
     def test_schema_preservation_on_create_if_not_exists(self):
         """Prove that CREATE TABLE IF NOT EXISTS does not alter existing schemas in DuckDB."""
         self.conn.execute("CREATE TABLE checkpoints_test (old_col VARCHAR PRIMARY KEY)")
