@@ -74,8 +74,7 @@ def run():
     
     log_memory("after candidate generation")
     
-    gt_dict = parse_ground_truth_matches(gt, cfg)
-    c_recall_stats, _, _, _ = evaluate_candidate_recall(candidates_train, gt_dict, cfg)
+    c_recall_stats = evaluate_candidate_recall(candidates_train, gt, cfg)
     c_summary = summarize_candidates(candidates_train, len(s1_train))
     
     print("\n" + "="*40)

@@ -75,7 +75,7 @@ SOURCE_S2 = "S2"
 SOURCE_S3 = "S3"
 
 # Type aliases
-_ExactIndex = Dict[str, List[Tuple[str, str]]]   # norm_value -> [(eid, source), ...]
+_ExactIndex = Tuple[Dict[str, List[int]], Dict[str, List[int]]]   # (s2_index, s3_index)
 _CandKey    = Tuple[str, str, str]                # (s1_id, matched_id, source)
 
 
@@ -161,30 +161,27 @@ def _build_exact_index(
         The normalised column to index (e.g. ``cfg.COL_NAME_NORM``).
     config:
         Pipeline configuration.
-
-    Returns
-    -------
-    dict
-        ``{normalised_value: [(entity_id, source_label), ...]}``
-
-        Empty strings are never added to the index (they are not
-        discriminative and would produce massive false-positive buckets).
     """
-    index: _ExactIndex = defaultdict(list)
-    eid_col = config.COL_ENTITY_ID
+    s2_index: Dict[str, List[int]] = defaultdict(list)
+    s3_index: Dict[str, List[int]] = defaultdict(list)
 
-    for df, source_label in [(s2, SOURCE_S2), (s3, SOURCE_S3)]:
-        entity_ids: List[str] = df[eid_col].tolist()
-        field_vals: List[str] = df[field].fillna("").tolist()
-        for eid, val in zip(entity_ids, field_vals):
-            if val:  # skip empty -- they are not discriminative
-                index[val].append((eid, source_label))
+    s2_vals = s2[field].fillna("").tolist()
+    for i, val in enumerate(s2_vals):
+        if val:
+            s2_index[val].append(i)
 
-    return dict(index)
+    s3_vals = s3[field].fillna("").tolist()
+    for i, val in enumerate(s3_vals):
+        if val:
+            s3_index[val].append(i)
+
+    return dict(s2_index), dict(s3_index)
 
 
 def _retrieve_exact_pass(
     s1: pd.DataFrame,
+    s2: pd.DataFrame,
+    s3: pd.DataFrame,
     index: _ExactIndex,
     field: str,
     pass_col: str,
@@ -193,6 +190,8 @@ def _retrieve_exact_pass(
     """
     Retrieve candidates for all S1 entities using the exact inverted index.
     """
+    s2_index, s3_index = index
+    
     out_s1 = []
     out_cand = []
     out_src = []
@@ -200,15 +199,25 @@ def _retrieve_exact_pass(
     eid_col = config.COL_ENTITY_ID
     s1_ids: List[str] = s1[eid_col].tolist()
     field_vals: List[str] = s1[field].fillna("").tolist()
+    
+    s2_eids = s2[eid_col].values
+    s3_eids = s3[eid_col].values
 
     for s1_id, val in zip(s1_ids, field_vals):
         if not val:
-            continue  # empty normalised value -- skip
-        matches = index.get(val, [])
-        for (matched_id, matched_source) in matches:
-            out_s1.append(s1_id)
-            out_cand.append(matched_id)
-            out_src.append(matched_source)
+            continue
+            
+        if val in s2_index:
+            for idx in s2_index[val]:
+                out_s1.append(s1_id)
+                out_cand.append(s2_eids[idx])
+                out_src.append(SOURCE_S2)
+                
+        if val in s3_index:
+            for idx in s3_index[val]:
+                out_s1.append(s1_id)
+                out_cand.append(s3_eids[idx])
+                out_src.append(SOURCE_S3)
 
     return pd.DataFrame({
         COL_S1_ID: out_s1,
@@ -247,7 +256,7 @@ def _build_ngram_index(
 
     Returns
     -------
-    vectorizer : TfidfVectorizer
+    vectorizer : HashingVectorizer
         Fitted vectorizer; use ``vectorizer.transform(texts)`` for queries.
     X_corpus : csr_matrix, shape (N_s2 + N_s3, n_features)
         L2-normalised TF-IDF matrix of the full S2+S3 corpus.
@@ -296,19 +305,19 @@ def _build_ngram_index(
             corpus_sources,
         )
 
-    vectorizer = TfidfVectorizer(
-        analyzer="char_wb",
+    from sklearn.feature_extraction.text import HashingVectorizer
+    vectorizer = HashingVectorizer(
+        analyzer="char",
         ngram_range=(config.CHAR_NGRAM_MIN, config.CHAR_NGRAM_MAX),
+        alternate_sign=False,
         norm="l2",
-        sublinear_tf=True,
-        max_df=0.99,
-        min_df=1,
         dtype=np.float32,
+        n_features=2**20,
     )
     X_corpus: csr_matrix = vectorizer.fit_transform(corpus_texts)
     logger.debug(
-        "N-gram index for '%s': corpus size=%d, vocab=%d, matrix=%s",
-        field, len(corpus_texts), len(vectorizer.vocabulary_), X_corpus.shape,
+        "N-gram index for '%s': corpus size=%d, matrix=%s",
+        field, len(corpus_texts), X_corpus.shape,
     )
     return vectorizer, X_corpus, corpus_ids, corpus_sources
 
@@ -647,9 +656,9 @@ def generate_candidates(
         s1_chunk = s1.iloc[chunk_start:chunk_end].copy()
         
         # 1. Exact name
-        p1 = _retrieve_exact_pass(s1_chunk, exact_name_idx, name_field, COL_EX_NAME, config)
+        p1 = _retrieve_exact_pass(s1_chunk, s2, s3, exact_name_idx, name_field, COL_EX_NAME, config)
         # 2. Exact address
-        p2 = _retrieve_exact_pass(s1_chunk, exact_addr_idx, addr_field, COL_EX_ADDR, config)
+        p2 = _retrieve_exact_pass(s1_chunk, s2, s3, exact_addr_idx, addr_field, COL_EX_ADDR, config)
         # 3. N-gram name
         p3 = _retrieve_ngram_pass(
             s1_chunk, name_vect, X_name_corpus, name_ids, name_sources,
