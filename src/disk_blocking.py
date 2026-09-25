@@ -38,6 +38,12 @@ class DiskBlocker:
     def generate_exact_blocks(self):
         """Populate exact name, exact address, and prefix4+house blocks (Phase 3B)."""
         import time
+        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR PRIMARY KEY)")
+        exists = self.conn.execute("SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = 'PHASE3B_BLOCKING_KEYS_COMPLETE'").fetchone()[0]
+        if exists > 0:
+            logger.info("PHASE3B_BLOCKING_KEYS_COMPLETE: Skipped block generation.")
+            return
+            
         logger.info("Generating exact match and prefix4+house blocking keys...")
         
         try:
@@ -89,6 +95,7 @@ class DiskBlocker:
                 """)
                 logger.info(f"END {src} prefix4_house key population | Time: {time.time()-t0:.2f}s | RSS: {self._get_rss_gb():.3f} GB")
                 
+            self.conn.execute("INSERT INTO checkpoints VALUES ('PHASE3B_BLOCKING_KEYS_COMPLETE')")
             logger.info("PHASE3B_BLOCKING_KEYS_COMPLETE")
         except Exception as e:
             import traceback
@@ -138,13 +145,13 @@ class DiskBlocker:
         Executes the join for safe blocks and inserts directly into `candidates`.
         Includes checkpointing to prevent re-running completed passes.
         """
-        checkpoint_key = f"{block_type}_{matched_source}"
+        pass_checkpoint = f"{block_type}_{matched_source}_COMPLETE"
         
-        # Check if pass already completed
-        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (pass_name VARCHAR PRIMARY KEY)")
-        exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE pass_name = '{checkpoint_key}'").fetchone()[0]
+        # Check if pass already completed entirely
+        self.conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR PRIMARY KEY)")
+        exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = '{pass_checkpoint}'").fetchone()[0]
         if exists > 0:
-            logger.info(f"Checkpoint found for '{checkpoint_key}'. Skipping generation.")
+            logger.info(f"Checkpoint found for '{pass_checkpoint}'. Skipping generation.")
             return
             
         logger.info(f"Generating candidates for '{block_type}' against '{matched_source}'")
@@ -187,9 +194,23 @@ class DiskBlocker:
         logger.info(f"Total safe keys for {block_type}: {total_safe_keys}")
         
         chunk_size = 50_000
-        inserted_total = 0
+        batch_idx = 0
+        import time
         
         for offset in range(0, total_safe_keys, chunk_size):
+            batch_checkpoint = f"{block_type}_{matched_source}_batch_{batch_idx}_offset_{offset}"
+            
+            # Check if this batch is already done
+            batch_exists = self.conn.execute(f"SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = '{batch_checkpoint}'").fetchone()[0]
+            if batch_exists > 0:
+                logger.info(f"Skipping completed batch: {batch_checkpoint}")
+                batch_idx += 1
+                continue
+                
+            chunk_end = min(offset + chunk_size, total_safe_keys)
+            logger.info(f"CANDIDATE_BATCH_START: {block_type} -> {matched_source} (Batch {batch_idx}, Keys {offset} to {chunk_end})")
+            t0 = time.time()
+            
             # Create a chunk of safe keys
             self.conn.execute(f"""
             CREATE TEMP TABLE safe_keys_chunk AS
@@ -219,18 +240,22 @@ class DiskBlocker:
             # Release intermediate state
             self.conn.execute("DROP TABLE safe_keys_chunk")
             
+            # Mark batch complete ONLY after successful transaction
+            self.conn.execute(f"INSERT INTO checkpoints VALUES ('{batch_checkpoint}')")
+            
             # Track progress
-            chunk_end = min(offset + chunk_size, total_safe_keys)
-            logger.info(f"[{block_type} -> {matched_source}] Processed keys {chunk_end}/{total_safe_keys} | RSS: {self._get_rss_gb():.3f} GB")
+            elapsed = time.time() - t0
+            logger.info(f"CANDIDATE_BATCH_COMPLETE: {block_type} -> {matched_source} | Batch {batch_idx} | Keys: {chunk_end}/{total_safe_keys} | Time: {elapsed:.2f}s | RSS: {self._get_rss_gb():.3f} GB")
             gc.collect()
+            batch_idx += 1
             
         # Clean up global safe keys tables
         self.conn.execute("DROP TABLE tmp_s1_cnt")
         self.conn.execute("DROP TABLE tmp_s2_cnt")
         self.conn.execute("DROP TABLE safe_keys")
         
-        # Write checkpoint
-        self.conn.execute(f"INSERT INTO checkpoints VALUES ('{checkpoint_key}')")
+        # Mark entire pass complete
+        self.conn.execute(f"INSERT INTO checkpoints VALUES ('{pass_checkpoint}')")
         
         inserted_count = self.conn.execute(f"SELECT COUNT(*) FROM candidates WHERE {flag_col} = TRUE AND matched_source = '{matched_source}'").fetchone()[0]
         logger.info(f"Candidate generation complete. Candidates with {flag_col}=TRUE from {matched_source}: {inserted_count}")

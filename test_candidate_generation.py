@@ -34,6 +34,7 @@ class TestCandidateGeneration(unittest.TestCase):
         
     def tearDown(self):
         self.blocker.close()
+        self.conn.close()
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)
@@ -167,6 +168,9 @@ class TestCandidateGeneration(unittest.TestCase):
         self.conn.execute("INSERT INTO s1_blocks VALUES ('S1-STALE', 'exact_name', 'stale')")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM s1_blocks").fetchone()[0], 4)
         
+        # Manually delete the complete checkpoint to simulate a failed previous run
+        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'PHASE3B_BLOCKING_KEYS_COMPLETE'")
+        
         # Second initialization (should safely DROP and CREATE, clearing the corruption)
         self.blocker.generate_exact_blocks()
         
@@ -177,11 +181,53 @@ class TestCandidateGeneration(unittest.TestCase):
         
         # Ensure it works end-to-end after restart
         self.conn.execute("INSERT INTO s2 VALUES ('S2-1', 'amazon', 'seattle')")
+        # Need to clear the checkpoint so it actually runs
+        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'PHASE3B_BLOCKING_KEYS_COMPLETE'")
         self.blocker.generate_exact_blocks()
         self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
         
         cands = self.conn.execute("SELECT * FROM candidates").fetchdf()
         self.assertEqual(len(cands), 1)
+
+    def test_resume_batch_generation(self):
+        """Simulate an interruption and verify resume logic skips completed batches."""
+        # 1. Insert enough records to generate multiple batches
+        self.conn.execute("INSERT INTO s1 VALUES ('S1-RESUME-1', 'amazon', 'seattle')")
+        self.conn.execute("INSERT INTO s1 VALUES ('S1-RESUME-2', 'apple', 'cupertino')")
+        self.conn.execute("INSERT INTO s1 VALUES ('S1-RESUME-3', 'google', 'mountain view')")
+        self.conn.execute("INSERT INTO s2 VALUES ('S2-RESUME-1', 'amazon', 'seattle')")
+        self.conn.execute("INSERT INTO s2 VALUES ('S2-RESUME-2', 'apple', 'cupertino')")
+        self.conn.execute("INSERT INTO s2 VALUES ('S2-RESUME-3', 'google', 'mountain view')")
+        
+        # 2. First execution - normal
+        self.blocker.generate_exact_blocks()
+        
+        # Mock chunk size to force 3 batches (chunk_size=1)
+        original_execute = self.conn.execute
+        
+        # Let's just directly insert a checkpoint for batch 0 and 1!
+        self.conn.execute("INSERT INTO checkpoints VALUES ('exact_name_s2_batch_0_offset_0')")
+        self.conn.execute("INSERT INTO checkpoints VALUES ('exact_name_s2_batch_1_offset_50000')")
+        
+        # Run it once. It will skip batch 0 and complete the PASS checkpoint!
+        self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
+        
+        # We expect 0 candidates because the only batch (offset 0) was marked complete.
+        cands_skipped = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        self.assertEqual(cands_skipped, 0)
+        
+        # Now delete the batch checkpoint AND the pass checkpoint to rerun it successfully.
+        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'exact_name_s2_batch_0_offset_0'")
+        self.conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = 'exact_name_s2_COMPLETE'")
+        self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
+        
+        cands_run = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        self.assertEqual(cands_run, 3) # 3 matching pairs
+        
+        # Run it a third time, but the pass is marked complete: 'exact_name_s2_COMPLETE'
+        self.blocker.generate_candidates('exact_name', 's2', 'from_exact_name')
+        cands_final = self.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        self.assertEqual(cands_final, 3) # Still 3, didn't run again
 
 if __name__ == '__main__':
     unittest.main()

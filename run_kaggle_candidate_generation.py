@@ -112,11 +112,13 @@ def main():
     conn.execute("PRAGMA temp_directory='output/intermediate/tmp'")
     os.makedirs("output/intermediate/tmp", exist_ok=True)
     
-    # Clear any old candidates safely without causing massive MVCC DELETE overhead
-    logger.info("Resetting candidates table...")
-    conn.execute("DROP TABLE IF EXISTS candidates")
+    # Initialize checkpoints table
+    conn.execute("CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR PRIMARY KEY)")
+    
+    # Initialize candidates table if not exists (resume mode)
+    logger.info("PHASE3B_RESUME_STATE: Checking existing state...")
     conn.execute("""
-    CREATE TABLE candidates (
+    CREATE TABLE IF NOT EXISTS candidates (
         source1_entity_id VARCHAR,
         matched_entity_id VARCHAR,
         matched_source VARCHAR,
@@ -129,13 +131,23 @@ def main():
         PRIMARY KEY (source1_entity_id, matched_entity_id)
     )
     """)
-    conn.execute("DROP TABLE IF EXISTS checkpoints")
+    
+    # Print resume state
+    resumed = conn.execute("SELECT checkpoint_id FROM checkpoints").fetchall()
+    for row in resumed:
+        logger.info(f"RESUME STATE: {row[0]}")
     
     # Initialize disk blocker
     logger.info(f"Initializing DiskBlocker... (RSS: {get_rss_gb():.3f} GB)")
     blocker = DiskBlocker(DB_PATH, "output/intermediate/tmp", max_block_pairs=50_000)
     
     try:
+        # 0. Check if entire phase is already completed
+        is_complete = conn.execute("SELECT COUNT(*) FROM checkpoints WHERE checkpoint_id = 'PHASE3B_COMPLETE'").fetchone()[0]
+        if is_complete > 0:
+            logger.info("PHASE3B_COMPLETE: Phase 3B candidate generation is already fully completed.")
+            return
+
         # 1. Generate blocks (extract keys for S1, S2, S3)
         blocker.generate_exact_blocks()
         
@@ -169,13 +181,15 @@ def main():
         evaluate_candidates(conn, 's2', label="POST-CAP")
         evaluate_candidates(conn, 's3', label="POST-CAP")
         
+        conn.execute("INSERT INTO checkpoints VALUES ('PHASE3B_COMPLETE')")
+        
         elapsed = time.time() - start_time
         logger.info(f"[8] Total Runtime: {elapsed:.2f}s")
         logger.info(f"[9] Peak RSS tracking via OS (Current RSS: {get_rss_gb():.3f} GB)")
-        logger.info("PHASE3B_CANDIDATE_GENERATION_COMPLETE")
+        logger.info("PHASE3B_COMPLETE")
     except Exception as e:
         import traceback
-        logger.error("PHASE3B_CANDIDATE_GENERATION_FAILED")
+        logger.error("PHASE3B_FAILED")
         logger.error(f"Failed with exception: {e}")
         traceback.print_exc()
         raise
