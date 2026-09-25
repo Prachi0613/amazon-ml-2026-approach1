@@ -182,26 +182,49 @@ class DiskBlocker:
         WHERE CAST(t1.s1_size AS BIGINT) * CAST(t2.s2_size AS BIGINT) <= {self.max_block_pairs}
         """)
         
-        # 2. Insert the actual candidate pairs directly into the candidates table via UPSERT
-        # We use safe_keys as the driving table.
-        insert_query = f"""
-        INSERT INTO candidates (source1_entity_id, matched_entity_id, matched_source, {flag_col})
-        SELECT 
-            s1.entity_id, 
-            s2.entity_id, 
-            '{matched_source}', 
-            TRUE
-        FROM safe_keys sk
-        JOIN s1_blocks s1 
-          ON sk.block_key = s1.block_key AND s1.block_type = '{block_type}'
-        JOIN {matched_source}_blocks s2 
-          ON sk.block_key = s2.block_key AND s2.block_type = '{block_type}'
-        ON CONFLICT (source1_entity_id, matched_entity_id) 
-        DO UPDATE SET {flag_col} = TRUE;
-        """
-        self.conn.execute(insert_query)
+        # 2. Process block keys in batches and insert candidates incrementally
+        total_safe_keys = self.conn.execute("SELECT COUNT(*) FROM safe_keys").fetchone()[0]
+        logger.info(f"Total safe keys for {block_type}: {total_safe_keys}")
         
-        # Clean up
+        chunk_size = 50_000
+        inserted_total = 0
+        
+        for offset in range(0, total_safe_keys, chunk_size):
+            # Create a chunk of safe keys
+            self.conn.execute(f"""
+            CREATE TEMP TABLE safe_keys_chunk AS
+            SELECT block_key FROM safe_keys 
+            ORDER BY block_key 
+            LIMIT {chunk_size} OFFSET {offset}
+            """)
+            
+            # Insert candidates for this chunk
+            insert_query = f"""
+            INSERT INTO candidates (source1_entity_id, matched_entity_id, matched_source, {flag_col})
+            SELECT 
+                s1.entity_id, 
+                s2.entity_id, 
+                '{matched_source}', 
+                TRUE
+            FROM safe_keys_chunk sk
+            JOIN s1_blocks s1 
+              ON sk.block_key = s1.block_key AND s1.block_type = '{block_type}'
+            JOIN {matched_source}_blocks s2 
+              ON sk.block_key = s2.block_key AND s2.block_type = '{block_type}'
+            ON CONFLICT (source1_entity_id, matched_entity_id) 
+            DO UPDATE SET {flag_col} = TRUE;
+            """
+            self.conn.execute(insert_query)
+            
+            # Release intermediate state
+            self.conn.execute("DROP TABLE safe_keys_chunk")
+            
+            # Track progress
+            chunk_end = min(offset + chunk_size, total_safe_keys)
+            logger.info(f"[{block_type} -> {matched_source}] Processed keys {chunk_end}/{total_safe_keys} | RSS: {self._get_rss_gb():.3f} GB")
+            gc.collect()
+            
+        # Clean up global safe keys tables
         self.conn.execute("DROP TABLE tmp_s1_cnt")
         self.conn.execute("DROP TABLE tmp_s2_cnt")
         self.conn.execute("DROP TABLE safe_keys")
