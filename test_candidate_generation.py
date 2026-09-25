@@ -110,6 +110,9 @@ class TestCandidateGeneration(unittest.TestCase):
 
     def test_candidate_capping_determinism(self):
         # We need to test the cap_candidates function determinism
+        # and ensure it reads the canonical config correctly.
+        from src.config import cfg
+        
         self.conn.execute("INSERT INTO s1 VALUES ('S1-CAP', 'target', 'addr')")
         
         # Insert 10 candidates with exact same score but different matched_entity_id
@@ -118,31 +121,40 @@ class TestCandidateGeneration(unittest.TestCase):
         for i in range(10, 0, -1):
             self.conn.execute(f"INSERT INTO candidates (source1_entity_id, matched_entity_id, from_exact_name, from_name_block) VALUES ('S1-CAP', 'S2-{i:02d}', FALSE, TRUE)")
             
-        self.blocker.cap_candidates(max_candidates_per_s1=3)
-        cands = self.conn.execute("SELECT matched_entity_id FROM candidates WHERE source1_entity_id = 'S1-CAP' ORDER BY matched_entity_id").fetchall()
-        
-        # Should be capped to exactly 3 candidates
-        self.assertEqual(len(cands), 3)
-        
-        # Because scores are tied (10), tie-breaker is matched_entity_id ASC
-        # So we expect S2-01, S2-02, S2-03
-        self.assertEqual(cands[0][0], 'S2-01')
-        self.assertEqual(cands[1][0], 'S2-02')
-        self.assertEqual(cands[2][0], 'S2-03')
-        
-        # Verify removed candidates are totally absent
-        missing = self.conn.execute("SELECT COUNT(*) FROM candidates WHERE matched_entity_id = 'S2-04'").fetchone()[0]
-        self.assertEqual(missing, 0)
-        
-        # Run it again on fresh data to verify identical deterministic behavior
-        self.conn.execute("DELETE FROM candidates")
-        for i in range(10, 0, -1):
-            self.conn.execute(f"INSERT INTO candidates (source1_entity_id, matched_entity_id, from_exact_name, from_name_block) VALUES ('S1-CAP', 'S2-{i:02d}', FALSE, TRUE)")
+        # Temporarily mock the cfg value for the test
+        original_cap = cfg.MAX_CANDIDATES_PER_ENTITY
+        try:
+            # We mock the attribute on the frozen dataclass for the duration of the test
+            object.__setattr__(cfg, 'MAX_CANDIDATES_PER_ENTITY', 3)
             
-        self.blocker.cap_candidates(max_candidates_per_s1=3)
-        cands2 = self.conn.execute("SELECT matched_entity_id FROM candidates WHERE source1_entity_id = 'S1-CAP' ORDER BY matched_entity_id").fetchall()
-        
-        self.assertEqual(cands, cands2, "Deterministic capping failed across runs")
+            self.blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_ENTITY)
+            cands = self.conn.execute("SELECT matched_entity_id FROM candidates WHERE source1_entity_id = 'S1-CAP' ORDER BY matched_entity_id").fetchall()
+            
+            # Should be capped to exactly 3 candidates
+            self.assertEqual(len(cands), 3)
+            
+            # Because scores are tied (10), tie-breaker is matched_entity_id ASC
+            # So we expect S2-01, S2-02, S2-03
+            self.assertEqual(cands[0][0], 'S2-01')
+            self.assertEqual(cands[1][0], 'S2-02')
+            self.assertEqual(cands[2][0], 'S2-03')
+            
+            # Verify removed candidates are totally absent
+            missing = self.conn.execute("SELECT COUNT(*) FROM candidates WHERE matched_entity_id = 'S2-04'").fetchone()[0]
+            self.assertEqual(missing, 0)
+            
+            # Run it again on fresh data to verify identical deterministic behavior
+            self.conn.execute("DELETE FROM candidates")
+            for i in range(10, 0, -1):
+                self.conn.execute(f"INSERT INTO candidates (source1_entity_id, matched_entity_id, from_exact_name, from_name_block) VALUES ('S1-CAP', 'S2-{i:02d}', FALSE, TRUE)")
+                
+            self.blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_ENTITY)
+            cands2 = self.conn.execute("SELECT matched_entity_id FROM candidates WHERE source1_entity_id = 'S1-CAP' ORDER BY matched_entity_id").fetchall()
+            
+            self.assertEqual(cands, cands2, "Deterministic capping failed across runs")
+        finally:
+            # Restore original cap
+            object.__setattr__(cfg, 'MAX_CANDIDATES_PER_ENTITY', original_cap)
 
 if __name__ == '__main__':
     unittest.main()

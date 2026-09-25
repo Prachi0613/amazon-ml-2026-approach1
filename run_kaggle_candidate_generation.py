@@ -60,7 +60,7 @@ def evaluate_candidates(conn, src: str, label: str = ""):
     zero_cands = total_s1 - s1_rep
     
     # S1 with more than cap (if cap were applied)
-    max_cap = cfg.MAX_CANDIDATES_PER_S1
+    max_cap = cfg.MAX_CANDIDATES_PER_ENTITY
     over_cap_query = f"""
     SELECT COUNT(*) FROM (
         SELECT source1_entity_id, COUNT(*) as cnt
@@ -147,7 +147,7 @@ def main():
     
     # 4. Final Candidate Capping
     logger.info("Applying final deterministic candidate cap...")
-    blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_S1)
+    blocker.cap_candidates(cfg.MAX_CANDIDATES_PER_ENTITY)
     
     logger.info("--- Final Post-Cap Evaluation ---")
     evaluate_candidates(conn, 's2', label="POST-CAP")
