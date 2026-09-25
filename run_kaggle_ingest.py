@@ -32,19 +32,16 @@ def run_ingestion():
     os.makedirs(TEMP_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     
-    # Check if DB already populated (resumable)
+    # Strictly remove the old database so we don't end up with partial state
     if os.path.exists(DB_PATH):
+        logger.warning(f"Existing database found at {DB_PATH}. Removing to ensure clean ingestion.")
         try:
-            conn = duckdb.connect(DB_PATH, read_only=True)
-            cnt = conn.execute("SELECT COUNT(*) FROM s1").fetchone()[0]
-            conn.close()
-            if cnt > 1000000:
-                logger.info("Database appears to already be populated. Skipping ingestion.")
-                return
-        except Exception:
-            pass
-    
-    logger.info("Initializing DuckDB for ingestion...")
+            os.remove(DB_PATH)
+        except OSError as e:
+            logger.error(f"Failed to remove {DB_PATH}: {e}")
+            sys.exit(1)
+            
+    logger.info("Initializing DuckDB for clean ingestion...")
     storage = DiskStorage(DB_PATH, TEMP_DIR, memory_limit="20GB", threads=4)
     batch_size = 50_000
     
@@ -66,16 +63,43 @@ def run_ingestion():
 
 def verify_counts():
     conn = duckdb.connect(DB_PATH)
-    logger.info("--- Verification Results ---")
+    logger.info("--- Strict Verification Results ---")
     
-    for src in ["s1", "s2", "s3"]:
+    expected_counts = {
+        "s1": 2206821,
+        "s2": 5034616,
+        "s3": 5285603
+    }
+    
+    mismatch = False
+    for src, expected in expected_counts.items():
         cnt = conn.execute(f"SELECT COUNT(*) FROM {src}").fetchone()[0]
-        logger.info(f"Table {src}: {cnt} rows")
-        
+        if cnt != expected:
+            logger.error(f"Table {src} count mismatch: Expected {expected}, got {cnt}")
+            mismatch = True
+        else:
+            logger.info(f"Table {src}: {cnt} rows (VERIFIED)")
+            
     gt_cnt = conn.execute("SELECT COUNT(*) FROM ground_truth").fetchone()[0]
     gt_distinct = conn.execute("SELECT COUNT(DISTINCT source1_entity_id) FROM ground_truth").fetchone()[0]
     
-    logger.info(f"Table ground_truth: {gt_cnt} edge pairs | {gt_distinct} distinct S1 IDs")
+    if gt_cnt != 7638365:
+        logger.error(f"Table ground_truth edge count mismatch: Expected 7638365, got {gt_cnt}")
+        mismatch = True
+    else:
+        logger.info(f"Table ground_truth: {gt_cnt} edge pairs (VERIFIED)")
+        
+    if gt_distinct != 2083574:
+        logger.error(f"Table ground_truth distinct S1 IDs mismatch: Expected 2083574, got {gt_distinct}")
+        mismatch = True
+    else:
+        logger.info(f"Table ground_truth distinct S1 IDs: {gt_distinct} (VERIFIED)")
+    
+    if mismatch:
+        logger.error("Database ingestion is incomplete or corrupted! Exiting with non-zero status.")
+        conn.close()
+        sys.exit(1)
+        
     logger.info(f"Peak RSS at completion: {get_rss_gb():.3f} GB")
     logger.info(f"Database Path: {os.path.abspath(DB_PATH)}")
     
